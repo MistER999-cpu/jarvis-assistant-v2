@@ -90,7 +90,15 @@ function applyTheme(theme) {
   els.sunIcon.style.display = isDark ? "none" : "block";
   els.moonIcon.style.display = isDark ? "block" : "none";
   els.themeLabel.textContent = isDark ? "Light mode" : "Dark mode";
+
+  // The orb samples its colours from the gradient tokens, which the theme
+  // swaps, so it has to be repainted rather than left on the old palette.
+  if (orbView.ctx) {
+    refreshOrbPalette();
+    drawOrb(orbSpin, orbAnim.time, orbAnim.running ? orbMotion : null);
+  }
 }
+
 
 els.themeToggle.addEventListener("click", () => {
   const current = document.documentElement.getAttribute("data-theme");
@@ -711,6 +719,332 @@ function setStreamingState(isStreaming) {
 // ---------------- Orb (signature visual) ----------------
 
 /**
+ * The orb is a dot-matrix sphere drawn to a 2D canvas: a Fibonacci-distributed
+ * point cloud on a unit sphere, rotated and projected with a cheap perspective
+ * divide. It is not a 3D engine — there is no mesh, lighting or z-buffer, just
+ * painter's-algorithm sorting by depth, which is all the illusion needs.
+ *
+ * Two fidelity levels, picked from the rendered box size: the 104px landing orb
+ * gets the full field, the 26px docked one gets far fewer, larger dots. Packing
+ * landing density into 26px reads as noise, not a sphere.
+ */
+const ORB_LANDING_DOTS = 260;
+const ORB_DOCKED_DOTS = 34;
+const ORB_DOCKED_MAX_PX = 48; // below this the orb switches to the sparse field
+const ORB_CAMERA_Z = 2.7; // perspective distance in sphere radii; larger = flatter
+
+const orbView = {
+  canvas: null,
+  ctx: null,
+  dots: [],
+  projected: [], // reused every frame; see drawOrb
+  cssSize: 0,
+  dpr: 1,
+  sparse: false,
+  palette: null,
+};
+
+// Current Y rotation of the sphere, in radians.
+let orbSpin = 0.6;
+
+/**
+ * Per-state motion. `amp` is radial displacement as a fraction of the sphere
+ * radius, `freq` how many wave crests wrap the sphere, `speed` how fast they
+ * travel, `spin` the Y rotation in radians/second.
+ *
+ * thinking and speaking are placeholders in this stage and deliberately match
+ * idle — they get their own character in stages 3 and 4.
+ */
+const ORB_MOTION = {
+  idle: { amp: 0.028, freq: 2.4, speed: 0.5, spin: 0.11 },
+  thinking: { amp: 0.028, freq: 2.4, speed: 0.5, spin: 0.11 },
+  speaking: { amp: 0.028, freq: 2.4, speed: 0.5, spin: 0.11 },
+};
+
+let orbMode = "idle";
+
+// Live values, eased toward the target each frame so a state change glides
+// instead of snapping.
+const orbMotion = { amp: 0.028, freq: 2.4, speed: 0.5, spin: 0.11 };
+
+const orbAnim = {
+  rafId: null,
+  running: false,
+  lastTs: 0,
+  time: 0, // seconds of animation elapsed; only advances while visible
+  frame: 0,
+};
+
+function orbPrefersReducedMotion() {
+  return typeof window.matchMedia === "function" &&
+    window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+}
+
+/**
+ * Fibonacci sphere: the golden-angle spiral spreads points far more evenly than
+ * a lat/long grid, which would visibly bunch them at the poles.
+ */
+function buildSphereDots(count) {
+  const golden = Math.PI * (3 - Math.sqrt(5));
+  const dots = [];
+  for (let i = 0; i < count; i++) {
+    const y = 1 - (i / (count - 1)) * 2;
+    const radius = Math.sqrt(Math.max(0, 1 - y * y));
+    const theta = golden * i;
+    dots.push({ x: Math.cos(theta) * radius, y, z: Math.sin(theta) * radius });
+  }
+  return dots;
+}
+
+function parseHexColor(value) {
+  const hex = (value || "").trim().replace("#", "");
+  if (hex.length !== 6) return null;
+  return [
+    parseInt(hex.slice(0, 2), 16),
+    parseInt(hex.slice(2, 4), 16),
+    parseInt(hex.slice(4, 6), 16),
+  ];
+}
+
+/**
+ * Colours come from the theme's own gradient tokens, re-read on theme change so
+ * the orb tracks light/dark. Only start -> mid is used: those two are the
+ * blue/violet end of the ramp and give the dot field a clean cool gradient,
+ * where folding in the coral --grad-end muddied it.
+ */
+function refreshOrbPalette() {
+  const cs = getComputedStyle(document.documentElement);
+  const from = parseHexColor(cs.getPropertyValue("--grad-start")) || [108, 99, 232];
+  const to = parseHexColor(cs.getPropertyValue("--grad-mid")) || [177, 95, 216];
+  orbView.palette = { from, to };
+}
+
+function initOrbCanvas() {
+  orbView.canvas = document.getElementById("orbCanvas");
+  if (!orbView.canvas) return;
+  orbView.ctx = orbView.canvas.getContext("2d");
+  refreshOrbPalette();
+  resizeOrbCanvas();
+}
+
+/**
+ * Syncs the backing store to the element's real pixel size. Called whenever the
+ * orb docks or undocks, since that changes its box by a factor of four.
+ */
+function resizeOrbCanvas() {
+  if (!orbView.canvas || !els.heroOrb) return;
+
+  const rect = els.heroOrb.getBoundingClientRect();
+  const cssSize = Math.round(rect.width) || (els.heroOrb.classList.contains("orb-docked") ? 26 : 132);
+  const dpr = Math.min(window.devicePixelRatio || 1, 2); // cap: 3x costs pixels for no visible gain
+  const sparse = cssSize <= ORB_DOCKED_MAX_PX;
+
+  if (orbView.cssSize === cssSize && orbView.dpr === dpr && orbView.sparse === sparse) return;
+
+  orbView.cssSize = cssSize;
+  orbView.dpr = dpr;
+  orbView.sparse = sparse;
+  orbView.canvas.width = Math.max(1, Math.round(cssSize * dpr));
+  orbView.canvas.height = Math.max(1, Math.round(cssSize * dpr));
+
+  const wanted = sparse ? ORB_DOCKED_DOTS : ORB_LANDING_DOTS;
+  if (orbView.dots.length !== wanted) orbView.dots = buildSphereDots(wanted);
+
+  // Repaint immediately so the new size is filled this frame rather than
+  // flashing empty until the loop next runs (or forever, under reduced motion).
+  drawOrb(orbSpin, orbAnim.time, orbAnim.running ? orbMotion : null);
+}
+
+/**
+ * Draws one frame. `spin` is the Y rotation in radians and `time` the animation
+ * clock in seconds; `motion` carries the wave parameters (null renders the
+ * sphere undistorted, which is the reduced-motion path).
+ */
+function drawOrb(spin, time, motion) {
+  const { ctx, canvas, dots, dpr, cssSize, sparse, palette } = orbView;
+  if (!ctx || !palette) return;
+
+  const amp = motion ? motion.amp : 0;
+  const freq = motion ? motion.freq : 0;
+  const phase = motion ? time * motion.speed : 0;
+
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  ctx.save();
+  ctx.scale(dpr, dpr);
+
+  const center = cssSize / 2;
+  // Leave headroom so the sphere never touches the canvas edge; the docked orb
+  // is tiny enough that it can afford to fill more of its box.
+  const radius = center * (sparse ? 0.9 : 0.78);
+  // The docked orb needs proportionally much fatter dots: at 26px a
+  // landing-scale radius works out under a pixel and renders as faint dust.
+  const baseDot = sparse ? Math.max(1.1, cssSize * 0.078) : cssSize * 0.0135;
+
+  const sin = Math.sin(spin);
+  const cos = Math.cos(spin);
+  // Fixed tilt so the pole is slightly visible and the form reads as a ball
+  // rather than a flat disc of dots.
+  const tiltSin = Math.sin(-0.42);
+  const tiltCos = Math.cos(-0.42);
+
+  // The projection buffer is allocated once and rewritten in place. This loop
+  // runs ~60x a second for the life of the page, so per-frame object churn
+  // would hand the GC steady work for no reason.
+  const projected = orbView.projected;
+  while (projected.length < dots.length) projected.push({ sx: 0, sy: 0, depth: 0, persp: 1, shade: 0 });
+  projected.length = dots.length;
+
+  for (let i = 0; i < dots.length; i++) {
+    const d = dots[i];
+
+    // Two out-of-phase waves along different axes: a single one reads as a
+    // mechanical throb, while two crossing at different rates never quite
+    // repeat and look organic.
+    const wave = amp === 0
+      ? 0
+      : Math.sin(d.y * freq + phase) * amp +
+        Math.sin(d.x * freq * 0.7 - phase * 0.8) * amp * 0.5;
+    const swell = 1 + wave;
+
+    const dx = d.x * swell;
+    const dy = d.y * swell;
+    const dz = d.z * swell;
+
+    // Rotate about Y, then tilt about X.
+    const rx = dx * cos - dz * sin;
+    const rz = dx * sin + dz * cos;
+    const ry = dy * tiltCos - rz * tiltSin;
+    const rz2 = dy * tiltSin + rz * tiltCos;
+
+    const persp = ORB_CAMERA_Z / (ORB_CAMERA_Z - rz2);
+    const p = projected[i];
+    p.sx = center + rx * persp * radius;
+    p.sy = center + ry * persp * radius;
+    p.depth = rz2;
+    p.persp = persp;
+    p.shade = (rz2 + 1) / 2; // 0 at the back, 1 at the front
+  }
+
+  // Painter's algorithm: back to front, so near dots overlap far ones.
+  projected.sort((a, b) => a.depth - b.depth);
+
+  const { from, to } = palette;
+  for (let i = 0; i < projected.length; i++) {
+    const p = projected[i];
+    // At 26px there are too few pixels to imply a transparent shell: far-side
+    // dots just land between near ones and the whole thing reads as static.
+    // Dropping the back hemisphere leaves a legible little cluster.
+    if (sparse && p.shade < 0.42) continue;
+    // Blend along the gradient by depth, so the front of the sphere reads
+    // brighter and warmer than the back.
+    const t = p.shade;
+    const r = Math.round(from[0] + (to[0] - from[0]) * t);
+    const g = Math.round(from[1] + (to[1] - from[1]) * t);
+    const b = Math.round(from[2] + (to[2] - from[2]) * t);
+
+    // Depth has to drive size as well as opacity. With uniform dots the far
+    // hemisphere fills the middle and the whole thing reads as a flat disc;
+    // shrinking and fading the back is what sells the shell.
+    const depthScale = 0.34 + t * 0.66;
+    // Sparse mode already culls the back, so its remaining dots should stay
+    // solid rather than inheriting the landing orb's deep fade.
+    ctx.globalAlpha = sparse ? 0.55 + t * 0.45 : 0.14 + t * 0.86;
+    ctx.fillStyle = `rgb(${r}, ${g}, ${b})`;
+    ctx.beginPath();
+    ctx.arc(p.sx, p.sy, Math.max(0.35, baseDot * p.persp * depthScale), 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  ctx.globalAlpha = 1;
+  ctx.restore();
+}
+
+/**
+ * Renders the orb once, undistorted. Used for the reduced-motion path and as
+ * the repaint after a resize or theme change while the loop is stopped.
+ */
+function drawOrbStatic() {
+  drawOrb(orbSpin, 0, null);
+}
+
+function orbFrame(ts) {
+  if (!orbAnim.running) return;
+
+  // Clamp dt so returning from a background tab or a long stall advances the
+  // wave by one ordinary step instead of teleporting it.
+  const dt = orbAnim.lastTs ? Math.min((ts - orbAnim.lastTs) / 1000, 0.1) : 0;
+  orbAnim.lastTs = ts;
+  orbAnim.time += dt;
+  orbAnim.frame++;
+
+  // Ease the live parameters toward the current state's targets so switching
+  // state glides rather than snapping. ~4/sec converges in well under a second.
+  const target = ORB_MOTION[orbMode] || ORB_MOTION.idle;
+  const k = Math.min(1, dt * 4);
+  orbMotion.amp += (target.amp - orbMotion.amp) * k;
+  orbMotion.freq += (target.freq - orbMotion.freq) * k;
+  orbMotion.speed += (target.speed - orbMotion.speed) * k;
+  orbMotion.spin += (target.spin - orbMotion.spin) * k;
+
+  orbSpin += dt * orbMotion.spin;
+
+  // The docked orb is 26px of mostly-static dots; refreshing it every frame
+  // buys nothing visible, so it runs at half rate.
+  if (!orbView.sparse || orbAnim.frame % 2 === 0) {
+    drawOrb(orbSpin, orbAnim.time, orbMotion);
+  }
+
+  orbAnim.rafId = requestAnimationFrame(orbFrame);
+}
+
+function startOrbLoop() {
+  if (orbAnim.running || !orbView.ctx) return;
+  // Reduced motion gets a still sphere, and no loop at all — the cheapest way
+  // to honour the preference is to never schedule the frame.
+  if (orbPrefersReducedMotion()) {
+    drawOrbStatic();
+    return;
+  }
+  if (document.hidden) return;
+
+  orbAnim.running = true;
+  orbAnim.lastTs = 0;
+  orbAnim.rafId = requestAnimationFrame(orbFrame);
+}
+
+function stopOrbLoop() {
+  if (orbAnim.rafId !== null) cancelAnimationFrame(orbAnim.rafId);
+  orbAnim.rafId = null;
+  orbAnim.running = false;
+}
+
+// requestAnimationFrame is already throttled hard in background tabs, but
+// stopping outright means zero wakeups rather than a trickle.
+document.addEventListener("visibilitychange", () => {
+  if (document.hidden) {
+    stopOrbLoop();
+  } else {
+    startOrbLoop();
+  }
+});
+
+// Honour the preference changing at runtime, not just at load.
+if (typeof window.matchMedia === "function") {
+  const reduceQuery = window.matchMedia("(prefers-reduced-motion: reduce)");
+  const onReduceChange = () => {
+    if (reduceQuery.matches) {
+      stopOrbLoop();
+      drawOrbStatic();
+    } else {
+      startOrbLoop();
+    }
+  };
+  if (typeof reduceQuery.addEventListener === "function") {
+    reduceQuery.addEventListener("change", onReduceChange);
+  }
+}
+
+/**
  * Drives the orb from real app state:
  *  - "thinking": a reply is streaming in
  *  - "speaking": TTS audio is actively playing
@@ -719,6 +1053,9 @@ function setStreamingState(isStreaming) {
  * Only ever changes animation intensity — never visibility or opacity.
  */
 function setOrbState(mode) {
+  // The canvas renderer eases toward this mode's motion parameters; the class
+  // still drives the CSS halo around the dots.
+  orbMode = mode === "thinking" || mode === "speaking" ? mode : "idle";
   if (!els.heroOrb) return;
   els.heroOrb.classList.toggle("orb-thinking", mode === "thinking");
   els.heroOrb.classList.toggle("orb-speaking", mode === "speaking");
@@ -740,6 +1077,8 @@ function placeOrb(landing) {
   if (!target) return;
 
   els.heroOrb.classList.toggle("orb-docked", !landing);
+  // The box just changed size; the canvas backing store has to follow.
+  resizeOrbCanvas();
 
   if (landing) {
     // Back to the top of the empty state, above the title.
@@ -1321,6 +1660,8 @@ els.micBtn.addEventListener("touchend", (e) => {
 // ---------------- Initialization ----------------
 
 (async function init() {
+  initOrbCanvas();
+  startOrbLoop();
   initTheme();
   applyMuteState();
   await loadConversations();

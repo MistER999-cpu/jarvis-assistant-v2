@@ -347,63 +347,28 @@ body {
   pointer-events: none;
 }
 
-.hero-orb-core {
-  width: 104px;
-  height: 104px;
-  border-radius: 50%;
-  background: conic-gradient(from 180deg, var(--grad-start), var(--grad-mid), var(--grad-end), var(--grad-start));
-  box-shadow: 0 8px 40px -8px var(--orb-glow);
-  animation: orb-drift 8s ease-in-out infinite;
+/* The dot field itself is drawn to canvas by app.js. The canvas fills the
+   wrapper; the sphere is inset within it so the halo above has room to bloom
+   past the dots without being clipped. */
+.orb-canvas {
+  display: block;
+  width: 100%;
+  height: 100%;
 }
 
-.hero-orb-ring {
-  position: absolute;
-  inset: 0;
-  border-radius: 50%;
-  border: 1.5px solid var(--orb-glow);
-  opacity: 0;
-}
-
-/* Docked state: same element, same animations, smaller. Sizes are the only
-   thing that changes, which is why the pulse keyframes below animate transform
-   and never box-shadow — a blur radius tuned for a 104px orb would swamp a
-   26px one. Intensity lives on the halo instead, which scales with the orb. */
+/* Docked state changes only the box size. The renderer reads that size back
+   and picks its own dot count and detail level for it, rather than cramming
+   landing-density dots into 26px. */
 .hero-orb.orb-docked {
   width: 26px;
   height: 26px;
   margin-bottom: 0;
 }
 
-.hero-orb.orb-docked .hero-orb-core {
-  width: 26px;
-  height: 26px;
-  box-shadow: 0 2px 8px -2px var(--orb-glow);
-}
-
 .hero-orb.orb-docked::before { inset: -40%; opacity: 0.4; }
 
-.hero-orb.orb-thinking .hero-orb-core { animation: orb-drift 8s ease-in-out infinite, orb-pulse-soft 2.2s ease-in-out infinite; }
-.hero-orb.orb-thinking .hero-orb-ring { animation: orb-ring-expand 2.2s ease-out infinite; }
 .hero-orb.orb-thinking::before { animation: orb-halo-soft 2.2s ease-in-out infinite; }
-
-.hero-orb.orb-speaking .hero-orb-core { animation: orb-drift 8s ease-in-out infinite, orb-pulse-strong 0.9s ease-in-out infinite; }
-.hero-orb.orb-speaking .hero-orb-ring { animation: orb-ring-expand 0.9s ease-out infinite; }
 .hero-orb.orb-speaking::before { animation: orb-halo-strong 0.9s ease-in-out infinite; }
-
-@keyframes orb-drift {
-  0%, 100% { filter: hue-rotate(0deg); }
-  50% { filter: hue-rotate(18deg); }
-}
-
-@keyframes orb-pulse-soft {
-  0%, 100% { transform: scale(1); }
-  50% { transform: scale(1.045); }
-}
-
-@keyframes orb-pulse-strong {
-  0%, 100% { transform: scale(1); }
-  50% { transform: scale(1.09); }
-}
 
 @keyframes orb-halo-soft {
   0%, 100% { opacity: 0.5; }
@@ -415,13 +380,8 @@ body {
   50% { opacity: 0.95; }
 }
 
-@keyframes orb-ring-expand {
-  0% { transform: scale(0.85); opacity: 0.55; border-width: 1.5px; }
-  100% { transform: scale(1.55); opacity: 0; border-width: 0.5px; }
-}
-
 @media (prefers-reduced-motion: reduce) {
-  .hero-orb-core, .hero-orb-ring, .hero-orb::before { animation: none !important; }
+  .hero-orb::before { animation: none !important; }
 }
 
 .messages {
