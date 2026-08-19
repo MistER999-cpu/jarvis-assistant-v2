@@ -134,6 +134,34 @@ function getDateSection(isoString) {
   return "Older";
 }
 
+// Which date sections are collapsed. Persisted because this list re-renders on
+// every send, rename and delete — without it, a section the user collapsed
+// would spring back open the next time anything touched the sidebar.
+const COLLAPSED_SECTIONS_KEY = "jarvis-collapsed-sections";
+
+function getCollapsedSections() {
+  try {
+    return new Set(JSON.parse(localStorage.getItem(COLLAPSED_SECTIONS_KEY)) || []);
+  } catch {
+    return new Set();
+  }
+}
+
+function setSectionCollapsed(sectionName, collapsed) {
+  const stored = getCollapsedSections();
+  if (collapsed) {
+    stored.add(sectionName);
+  } else {
+    stored.delete(sectionName);
+  }
+  localStorage.setItem(COLLAPSED_SECTIONS_KEY, JSON.stringify([...stored]));
+}
+
+const SECTION_CHEVRON_SVG =
+  '<svg class="conv-section-chevron" width="11" height="11" viewBox="0 0 24 24" ' +
+  'fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" ' +
+  'stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg>';
+
 function renderConversationList(conversations) {
   els.conversationList.innerHTML = "";
 
@@ -141,20 +169,51 @@ function renderConversationList(conversations) {
   const grouped = { "Today": [], "Yesterday": [], "Previous 7 Days": [], "Older": [] };
   conversations.forEach((conv) => grouped[getDateSection(conv.updated_at)].push(conv));
 
+  const collapsedSections = getCollapsedSections();
+
   sections.forEach((sectionName) => {
     const items = grouped[sectionName];
     if (items.length === 0) return;
 
-    const heading = document.createElement("div");
-    heading.className = "conv-section-heading";
-    heading.textContent = sectionName;
-    els.conversationList.appendChild(heading);
+    const isCollapsed = collapsedSections.has(sectionName);
 
-    items.forEach((conv) => renderConversationItem(conv));
+    const section = document.createElement("div");
+    section.className = isCollapsed ? "conv-section collapsed" : "conv-section";
+
+    const heading = document.createElement("button");
+    heading.type = "button";
+    heading.className = "conv-section-heading";
+    heading.setAttribute("aria-expanded", String(!isCollapsed));
+    heading.innerHTML =
+      SECTION_CHEVRON_SVG +
+      '<span class="conv-section-label"></span>' +
+      '<span class="conv-section-count"></span>';
+    heading.querySelector(".conv-section-label").textContent = sectionName;
+    heading.querySelector(".conv-section-count").textContent = items.length;
+
+    heading.addEventListener("click", () => {
+      const nowCollapsed = section.classList.toggle("collapsed");
+      heading.setAttribute("aria-expanded", String(!nowCollapsed));
+      setSectionCollapsed(sectionName, nowCollapsed);
+    });
+
+    // Wrapper pair: .conv-section-body animates its grid row from 1fr to 0fr,
+    // .conv-section-items clips the overflow while it does.
+    const body = document.createElement("div");
+    body.className = "conv-section-body";
+    const itemsContainer = document.createElement("div");
+    itemsContainer.className = "conv-section-items";
+    body.appendChild(itemsContainer);
+
+    section.appendChild(heading);
+    section.appendChild(body);
+    els.conversationList.appendChild(section);
+
+    items.forEach((conv) => renderConversationItem(conv, itemsContainer));
   });
 }
 
-function renderConversationItem(conv) {
+function renderConversationItem(conv, container) {
   const node = convItemTpl.content.cloneNode(true);
   const item = node.querySelector(".conversation-item");
   item.dataset.convId = conv.id;
@@ -185,7 +244,7 @@ function renderConversationItem(conv) {
     loadConversations();
   });
 
-  els.conversationList.appendChild(node);
+  (container || els.conversationList).appendChild(node);
 }
 
 function startRenameConversation(itemEl, conv) {
@@ -756,12 +815,46 @@ chatAreaEl.addEventListener("drop", (e) => {
 
 // ---------------- Composer: sending, auto-resize ----------------
 
+// The composer floats over the message list, so the list needs bottom padding
+// equal to the composer's height or the newest message hides behind it. That
+// height changes as the textarea grows and when an image preview is staged, so
+// it is measured rather than hardcoded (the CSS carries a resting-height
+// fallback for browsers without ResizeObserver).
+const composerEl = document.querySelector(".composer");
+
+function syncComposerClearance() {
+  if (!composerEl) return;
+  document.documentElement.style.setProperty(
+    "--composer-clearance",
+    composerEl.offsetHeight + 16 + "px"
+  );
+}
+
+if (composerEl && typeof ResizeObserver !== "undefined") {
+  new ResizeObserver(syncComposerClearance).observe(composerEl);
+  syncComposerClearance();
+}
+
 function autoResizeTextarea() {
   els.messageInput.style.height = "auto";
   els.messageInput.style.height = Math.min(els.messageInput.scrollHeight, 200) + "px";
 }
 
 els.messageInput.addEventListener("input", autoResizeTextarea);
+
+// Empty-state suggestion cards seed the composer and hand over the caret; they
+// deliberately do not send, so the starter can be edited first. Bound once —
+// showEmptyState() detaches and re-appends this same element rather than
+// rebuilding it, so the listeners survive.
+document.querySelectorAll(".suggestion-card").forEach((card) => {
+  card.addEventListener("click", () => {
+    const starter = card.dataset.prompt || "";
+    els.messageInput.value = starter;
+    autoResizeTextarea();
+    els.messageInput.focus();
+    els.messageInput.setSelectionRange(starter.length, starter.length);
+  });
+});
 
 els.messageInput.addEventListener("keydown", (e) => {
   if (e.key === "Enter" && !e.shiftKey) {

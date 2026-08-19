@@ -81,54 +81,130 @@ body {
 }
 
 .sidebar-header {
-  padding: 14px;
+  padding: 12px 12px 10px;
 }
 
 .new-chat-btn {
   width: 100%;
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 9px;
   padding: 10px 14px;
   background: linear-gradient(100deg, var(--grad-start), var(--grad-mid) 60%, var(--grad-end));
   color: #fff;
   border: none;
   border-radius: var(--radius-md);
-  font-size: 14px;
-  font-weight: 500;
+  font-size: 13.5px;
+  font-weight: 550;
+  letter-spacing: -0.01em;
   cursor: pointer;
-  transition: filter 0.15s ease, transform 0.1s ease;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.06), 0 6px 16px -8px var(--orb-glow);
+  transition: filter 0.15s ease, transform 0.1s ease, box-shadow 0.15s ease;
 }
 
-.new-chat-btn:hover { filter: brightness(1.08); }
+.new-chat-btn:hover {
+  filter: brightness(1.08);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.08), 0 10px 22px -8px var(--orb-glow);
+}
 .new-chat-btn:active { transform: scale(0.98); }
 
 .conversation-list {
   flex: 1;
   overflow-y: auto;
-  padding: 4px 10px;
+  padding: 2px 8px 10px;
+}
+
+/* Each date bucket is a self-contained, collapsible group so the list reads as
+   distinct sections rather than one run-on column. */
+.conv-section + .conv-section {
+  margin-top: 2px;
+  border-top: 1px solid color-mix(in srgb, var(--border-color) 60%, transparent);
+  padding-top: 2px;
 }
 
 .conv-section-heading {
-  font-size: 11px;
-  font-weight: 650;
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  background: none;
+  border: none;
+  font-family: inherit;
+  font-size: 10.5px;
+  font-weight: 700;
   text-transform: uppercase;
-  letter-spacing: 0.04em;
+  letter-spacing: 0.06em;
   color: var(--text-tertiary);
-  padding: 14px 10px 6px;
+  padding: 10px 8px 6px;
+  border-radius: var(--radius-md);
+  cursor: pointer;
+  transition: color 0.12s ease;
 }
-.conv-section-heading:first-child { padding-top: 6px; }
+
+.conv-section-heading:hover { color: var(--text-secondary); }
+
+.conv-section-chevron {
+  flex-shrink: 0;
+  transition: transform 0.2s ease;
+}
+
+.conv-section.collapsed .conv-section-chevron {
+  transform: rotate(-90deg);
+}
+
+.conv-section-label {
+  flex: 1;
+  text-align: left;
+}
+
+/* Count only earns its space when the group is collapsed and its items are
+   no longer visible. */
+.conv-section-count {
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0;
+  color: var(--text-tertiary);
+  background: var(--bg-hover);
+  border-radius: 999px;
+  padding: 1px 7px;
+  opacity: 0;
+  transition: opacity 0.15s ease;
+}
+
+.conv-section.collapsed .conv-section-count { opacity: 1; }
+
+/* 1fr -> 0fr collapses smoothly without needing a measured pixel height. */
+.conv-section-body {
+  display: grid;
+  grid-template-rows: 1fr;
+  transition: grid-template-rows 0.22s ease;
+}
+
+.conv-section.collapsed .conv-section-body {
+  grid-template-rows: 0fr;
+}
+
+.conv-section-items {
+  overflow: hidden;
+  min-height: 0;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .conv-section-body { transition: none; }
+  .conv-section-chevron { transition: none; }
+}
 
 .conversation-item {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 9px 10px;
+  gap: 6px;
+  padding: 7px 10px;
   border-radius: var(--radius-md);
   cursor: pointer;
   color: var(--text-secondary);
-  font-size: 13.5px;
-  margin-bottom: 2px;
+  font-size: 13px;
+  margin-bottom: 1px;
   border-left: 2px solid transparent;
   transition: background 0.12s ease, border-color 0.12s ease, transform 0.08s ease;
 }
@@ -172,23 +248,30 @@ body {
 .conv-action-btn:hover { color: var(--text-primary); background: var(--border-color); }
 
 .sidebar-footer {
-  padding: 10px;
+  padding: 8px;
   border-top: 1px solid var(--border-color);
 }
 
+/* Shared shape for icon+text sidebar actions, so anything added to the footer
+   later lines up with the theme toggle instead of inventing its own metrics. */
 .theme-toggle-btn {
   width: 100%;
   display: flex;
   align-items: center;
   gap: 10px;
-  padding: 9px 10px;
+  padding: 8px 10px;
   background: none;
   border: none;
   border-radius: var(--radius-md);
   color: var(--text-secondary);
   cursor: pointer;
-  font-size: 13.5px;
+  font-family: inherit;
+  font-size: 13px;
+  font-weight: 500;
+  transition: background 0.12s ease, color 0.12s ease;
 }
+
+.theme-toggle-btn svg { flex-shrink: 0; }
 
 .theme-toggle-btn:hover { background: var(--bg-hover); color: var(--text-primary); }
 
@@ -252,17 +335,30 @@ body {
 
 .hero-orb {
   position: relative;
-  width: 92px;
-  height: 92px;
-  margin-bottom: 22px;
+  width: 132px;
+  height: 132px;
+  margin-bottom: 26px;
   display: flex;
   align-items: center;
   justify-content: center;
 }
 
+/* Ambient halo on the wrapper rather than the core: the core's box-shadow is
+   driven by the pulse keyframes, so adding glow there would fight the
+   thinking/speaking animations. */
+.hero-orb::before {
+  content: "";
+  position: absolute;
+  inset: -30%;
+  border-radius: 50%;
+  background: radial-gradient(circle, var(--orb-glow), transparent 68%);
+  opacity: 0.5;
+  pointer-events: none;
+}
+
 .hero-orb-core {
-  width: 72px;
-  height: 72px;
+  width: 104px;
+  height: 104px;
   border-radius: 50%;
   background: conic-gradient(from 180deg, var(--grad-start), var(--grad-mid), var(--grad-end), var(--grad-start));
   box-shadow: 0 8px 40px -8px var(--orb-glow);
@@ -310,7 +406,10 @@ body {
 .messages {
   flex: 1;
   overflow-y: auto;
-  padding: 24px 0 40px;
+  /* Bottom clearance for the floating composer, which overlays this list. The
+     fallback covers the resting height; app.js keeps the variable in sync as
+     the textarea grows or an image preview is staged. */
+  padding: 24px 0 var(--composer-clearance, 120px);
   opacity: 1;
   transition: opacity 0.12s ease;
 }
@@ -331,22 +430,93 @@ body {
   justify-content: center;
   color: var(--text-secondary);
   text-align: center;
+  padding: 24px;
 }
 
 .empty-state h1 {
-  font-size: 28px;
+  font-size: 40px;
   background: linear-gradient(100deg, var(--grad-start), var(--grad-mid) 55%, var(--grad-end));
   -webkit-background-clip: text;
   background-clip: text;
   color: transparent;
-  margin-bottom: 6px;
+  margin-bottom: 8px;
   font-weight: 650;
-  letter-spacing: -0.01em;
+  letter-spacing: -0.02em;
 }
 
 .empty-state p {
-  font-size: 14.5px;
+  font-size: 15px;
   color: var(--text-tertiary);
+}
+
+.suggestion-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+  margin-top: 30px;
+  width: 100%;
+  max-width: 520px;
+}
+
+.suggestion-card {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 13px 14px;
+  text-align: left;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-lg);
+  color: var(--text-secondary);
+  font-family: inherit;
+  cursor: pointer;
+  transition: border-color 0.15s ease, background 0.15s ease,
+              transform 0.12s ease, box-shadow 0.15s ease;
+}
+
+.suggestion-card:hover {
+  border-color: color-mix(in srgb, var(--grad-mid) 45%, var(--border-color));
+  background: var(--bg-hover);
+  transform: translateY(-2px);
+  box-shadow: 0 8px 20px -12px var(--orb-glow);
+}
+
+.suggestion-card:active { transform: translateY(0); }
+
+.suggestion-icon {
+  display: flex;
+  flex-shrink: 0;
+  color: var(--grad-mid);
+  margin-top: 1px;
+}
+
+.suggestion-text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.suggestion-title {
+  font-size: 13.5px;
+  font-weight: 600;
+  color: var(--text-primary);
+  letter-spacing: -0.01em;
+}
+
+.suggestion-sub {
+  font-size: 12px;
+  color: var(--text-tertiary);
+  line-height: 1.4;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .suggestion-card { transition: none; }
+  .suggestion-card:hover { transform: none; }
+}
+
+@media (max-width: 560px) {
+  .suggestion-grid { grid-template-columns: minmax(0, 1fr); }
 }
 
 .message {
@@ -640,11 +810,47 @@ body {
 
 /* ---------------- Composer ---------------- */
 
+/* Floating composer: overlays the message list rather than sitting in flow, so
+   messages scroll underneath it and it reads as detached from every edge.
+   .chat-area is the positioning context (already position: relative). */
 .composer {
-  padding: 10px 24px 18px;
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  padding: 10px 24px 20px;
   max-width: 780px;
   margin: 0 auto;
   width: 100%;
+  /* The wrapper spans the full width but is mostly empty gap; let scrolls and
+     clicks in that gap reach the messages behind instead of hitting a
+     invisible box. Children opt back in below. */
+  pointer-events: none;
+}
+
+.composer > * {
+  pointer-events: auto;
+}
+
+/* Scrim: without it, messages scrolling under the pill get sliced mid-line at
+   its edge, which reads as a clipping bug rather than depth. Fading them into
+   the page background instead keeps the float intentional. Sits behind the
+   pill because the children below are positioned and it is not. */
+.composer::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: calc(100% + 28px);
+  background: linear-gradient(to bottom, transparent, var(--bg-primary) 58%);
+  pointer-events: none;
+}
+
+.composer-inner,
+.composer-hint,
+.image-preview-strip {
+  position: relative;
 }
 
 .composer-inner {
@@ -653,16 +859,17 @@ body {
   gap: 8px;
   background: var(--bg-secondary);
   border: 1px solid var(--border-color);
-  border-radius: var(--radius-lg);
-  padding: 10px 10px 10px 16px;
-  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.04), 0 8px 24px -8px rgba(0, 0, 0, 0.06);
+  border-radius: 999px;
+  padding: 10px 12px 10px 18px;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.07),
+              0 18px 40px -14px rgba(0, 0, 0, 0.22);
   transition: border-color 0.2s ease, box-shadow 0.2s ease;
 }
 
 .composer-inner:focus-within {
   border-color: var(--grad-mid);
   box-shadow: 0 0 0 3px color-mix(in srgb, var(--grad-mid) 14%, transparent),
-              0 8px 24px -8px rgba(0, 0, 0, 0.08);
+              0 18px 40px -14px rgba(0, 0, 0, 0.26);
 }
 
 #messageInput {
@@ -755,6 +962,7 @@ body {
   .sidebar { position: fixed; z-index: 10; height: 100vh; }
   .sidebar.collapsed { margin-left: -260px; }
   .message { padding: 0 14px; }
+  .composer { padding: 8px 12px 14px; }
 }
 /* ---------------- Image attachment (preview + attach button) ---------------- */
 
