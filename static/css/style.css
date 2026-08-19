@@ -680,6 +680,23 @@ body {
 .msg-action-btn:hover { background: var(--bg-hover); color: var(--text-primary); }
 .msg-action-btn:active { transform: scale(0.92); }
 
+/* Read-aloud: speaker when idle, stop square while this message is speaking,
+   so the control always states what the next click will do. */
+.speak-btn .speak-stop-icon { display: none; }
+.speak-btn.speaking .speak-icon { display: none; }
+.speak-btn.speaking .speak-stop-icon { display: block; }
+
+.speak-btn.speaking {
+  color: var(--grad-mid);
+  background: color-mix(in srgb, var(--grad-mid) 14%, transparent);
+}
+
+/* The action row only fades in on hover, but a message being read aloud has to
+   stay visible so it can be stopped without hunting for it. */
+.message:has(.speak-btn.speaking) .message-actions {
+  opacity: 1;
+}
+
 .message-timestamp {
   font-size: 11px;
   color: var(--text-tertiary);
@@ -831,7 +848,7 @@ body {
 
 .stop-btn { background: var(--text-primary); }
 
-.mic-btn, .mute-btn {
+.mic-btn {
   background: none;
   border: none;
   color: var(--text-secondary);
@@ -849,7 +866,7 @@ body {
   touch-action: manipulation;
 }
 
-.mic-btn:hover, .mute-btn:hover { background: var(--bg-hover); color: var(--text-primary); }
+.mic-btn:hover { background: var(--bg-hover); color: var(--text-primary); }
 
 .mic-btn.recording {
   background: var(--danger);
@@ -861,8 +878,6 @@ body {
   0%, 100% { box-shadow: 0 0 0 0 rgba(192, 57, 43, 0.45); }
   50% { box-shadow: 0 0 0 8px rgba(192, 57, 43, 0); }
 }
-
-.mute-btn.muted { color: var(--text-tertiary); }
 
 .composer-hint {
   text-align: center;

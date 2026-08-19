@@ -18,7 +18,6 @@ const state = {
   isRecording: false,
   isTranscribing: false,
   recordingStartedAt: 0,
-  speechMuted: localStorage.getItem("jarvis-speech-muted") === "true",
   // Image attachment staged for the next message (base64 data URL, or null)
   pendingImage: null,
 };
@@ -36,14 +35,11 @@ const els = {
   sendBtn: document.getElementById("sendBtn"),
   stopBtn: document.getElementById("stopBtn"),
   micBtn: document.getElementById("micBtn"),
-  muteBtn: document.getElementById("muteBtn"),
   attachBtn: document.getElementById("attachBtn"),
   imageFileInput: document.getElementById("imageFileInput"),
   imagePreviewStrip: document.getElementById("imagePreviewStrip"),
   imagePreviewThumb: document.getElementById("imagePreviewThumb"),
   removeImageBtn: document.getElementById("removeImageBtn"),
-  speakerOnIcon: document.getElementById("speakerOnIcon"),
-  speakerOffIcon: document.getElementById("speakerOffIcon"),
   composerHint: document.getElementById("composerHint"),
   ttsAudioPlayer: document.getElementById("ttsAudioPlayer"),
   chatTitleHeader: document.getElementById("chatTitleHeader"),
@@ -58,6 +54,13 @@ const els = {
 const userMsgTpl = document.getElementById("userMessageTemplate");
 const assistantMsgTpl = document.getElementById("assistantMessageTemplate");
 const convItemTpl = document.getElementById("conversationItemTemplate");
+
+// Raw reply text per message element, used by read-aloud. It cannot be taken
+// from the rendered DOM: assistant text is markdown-rendered and code blocks
+// have "Copy" buttons injected into them, which would be read out loud. It
+// also cannot be captured at render time, because streamed replies are
+// rendered empty and filled in afterwards — hence a map updated on completion.
+const messageSpeechText = new WeakMap();
 
 // Configure marked.js to use highlight.js for syntax highlighting.
 // Guarded: marked/hljs load from a CDN via non-deferred <script> tags with no
@@ -303,6 +306,10 @@ async function openConversation(convId) {
   const res = await fetch(`/api/conversations/${convId}`);
   const conv = await res.json();
 
+  // Leaving this conversation: stop any read-aloud, since the button that
+  // would stop it is about to be removed from the DOM.
+  stopSpeech();
+
   // Move the orb before the empty state is hidden and detached, so it stays on
   // screen instead of going down with it.
   placeOrbAnimated(false);
@@ -322,6 +329,7 @@ async function openConversation(convId) {
 }
 
 function showEmptyState() {
+  stopSpeech(); // same reason as openConversation
   els.messages.innerHTML = "";
   els.messages.appendChild(els.emptyState);
   els.emptyState.style.display = "flex";
@@ -473,6 +481,8 @@ function renderMessage(role, content, messageId, timestamp, imageData) {
     }
   }
 
+  messageSpeechText.set(msgEl, content || "");
+
   const tsEl = msgEl.querySelector(".message-timestamp");
   if (tsEl) tsEl.textContent = formatTimestamp(timestamp);
 
@@ -492,6 +502,13 @@ function renderMessage(role, content, messageId, timestamp, imageData) {
   } else {
     const regenBtn = msgEl.querySelector(".regenerate-btn");
     regenBtn.addEventListener("click", () => handleRegenerate());
+
+    const speakBtn = msgEl.querySelector(".speak-btn");
+    if (speakBtn) {
+      speakBtn.addEventListener("click", () =>
+        toggleSpeakMessage(speakBtn, () => messageSpeechText.get(msgEl) || "")
+      );
+    }
   }
 
   els.messages.appendChild(msgEl);
@@ -687,10 +704,13 @@ async function streamFromEndpoint(url, body) {
   setStreamingState(false);
   state.abortController = null;
 
-  // Speak the reply out loud (unless cancelled by the user or nothing was generated)
-  if (!wasAborted && fullText.trim() && !state.speechMuted) {
-    speakText(fullText);
-  }
+  // The reply was rendered empty and streamed in, so this is the first point
+  // at which its full text is known to read-aloud.
+  messageSpeechText.set(assistantEl, fullText);
+
+  // Replies are no longer spoken automatically: the per-message read-aloud
+  // button is the way in, matching how the rest of the action row works. The
+  // global mute toggle that used to gate this went away with it.
 
   // Refresh the sidebar (auto-generated title / recency order).
   // If the request was aborted, the server may not have finished writing to
@@ -1834,6 +1854,99 @@ function stripMarkdownForSpeech(text) {
 }
 
 /**
+ * Playback control for read-aloud.
+ *
+ * `token` is the important part. Both TTS paths play a queue — browser speech
+ * splits long text into sentence-sized utterances, and the Orpheus path
+ * returns several clips — and each piece advances the queue from its own end
+ * handler. Cancelling mid-queue still fires that handler (speechSynthesis
+ * .cancel() ends the current utterance, and a failed utterance fires error),
+ * so the handler would obediently start the *next* piece: the stop button
+ * skipped forward a sentence instead of stopping.
+ *
+ * Every playback captures the token it started under, and every continuation
+ * checks it first. stopSpeech() bumps the token, which orphans any handler
+ * still in flight no matter which event the browser chooses to fire.
+ */
+const tts = {
+  token: 0,
+  button: null, // the .speak-btn currently playing, or null
+};
+
+function updateSpeakButtons() {
+  document.querySelectorAll(".speak-btn").forEach((btn) => {
+    const on = btn === tts.button;
+    btn.classList.toggle("speaking", on);
+    btn.title = on ? "Stop" : "Read aloud";
+  });
+}
+
+/**
+ * Halts playback on both paths and invalidates anything queued behind it.
+ * Safe to call when nothing is playing.
+ */
+function stopSpeech() {
+  tts.token++;
+  tts.button = null;
+
+  if ("speechSynthesis" in window) window.speechSynthesis.cancel();
+
+  if (els.ttsAudioPlayer) {
+    // Detach first: pausing with the handlers still attached is what let the
+    // queue continue on its own.
+    els.ttsAudioPlayer.onended = null;
+    els.ttsAudioPlayer.onerror = null;
+    els.ttsAudioPlayer.pause();
+    try {
+      els.ttsAudioPlayer.currentTime = 0;
+    } catch (err) {
+      /* no media loaded yet */
+    }
+  }
+
+  setOrbState("idle");
+  updateSpeakButtons();
+}
+
+/**
+ * Read-aloud toggle for one message. Clicking the message that is currently
+ * speaking stops it; clicking any other stops that one first, so only ever one
+ * message is audible.
+ */
+function toggleSpeakMessage(btn, getText) {
+  if (tts.button === btn) {
+    stopSpeech();
+    return;
+  }
+
+  stopSpeech(); // whatever else was playing, including nothing
+
+  const text = (getText() || "").trim();
+  if (!text) return;
+
+  tts.button = btn;
+  updateSpeakButtons();
+
+  const token = tts.token;
+  speakText(text).then(
+    () => {
+      // Only clear if this playback is still the current one; a later start
+      // has already taken over the button state.
+      if (token === tts.token) {
+        tts.button = null;
+        updateSpeakButtons();
+      }
+    },
+    () => {
+      if (token === tts.token) {
+        tts.button = null;
+        updateSpeakButtons();
+      }
+    }
+  );
+}
+
+/**
  * Speaks text using the browser's built-in SpeechSynthesis API. Free, works
  * offline, no rate limits — used when USE_BROWSER_TTS is true. Drives the
  * same orb "speaking" state as the Groq path so the visual stays consistent.
@@ -1855,10 +1968,18 @@ async function speakWithBrowserTTS(rawText) {
     // reuse the same sentence-aware chunking idea as the server-side path.
     const chunks = text.match(/[^.!?]+[.!?]*\s*/g) || [text];
 
+    // Claim this playback. Any handler below that finds the token has moved on
+    // belongs to a run the user already stopped, and must not queue more audio.
+    const token = tts.token;
+
     setOrbState("speaking");
     let index = 0;
 
     const speakNext = () => {
+      if (token !== tts.token) {
+        resolve(); // stopped: abandon the rest of the queue
+        return;
+      }
       if (index >= chunks.length) {
         setOrbState("idle");
         resolve();
@@ -1917,6 +2038,9 @@ async function speakText(text) {
 function playAudioQueue(base64Clips) {
   return new Promise((resolve) => {
     let index = 0;
+    // Same guard as the browser path: a clip's end handler must not start the
+    // next one if the user has stopped playback in the meantime.
+    const token = tts.token;
     setOrbState("speaking");
 
     const finish = () => {
@@ -1925,6 +2049,10 @@ function playAudioQueue(base64Clips) {
     };
 
     const playNext = () => {
+      if (token !== tts.token) {
+        resolve(); // stopped: leave the remaining clips unplayed
+        return;
+      }
       if (index >= base64Clips.length) {
         finish();
         return;
@@ -1954,25 +2082,6 @@ function playAudioQueue(base64Clips) {
     ensureOrbAudio().then(playNext, playNext);
   });
 }
-
-function applyMuteState() {
-  els.muteBtn.classList.toggle("muted", state.speechMuted);
-  els.speakerOnIcon.style.display = state.speechMuted ? "none" : "block";
-  els.speakerOffIcon.style.display = state.speechMuted ? "block" : "none";
-  els.muteBtn.title = state.speechMuted ? "Enable voice replies" : "Mute voice replies";
-}
-
-els.muteBtn.addEventListener("click", () => {
-  state.speechMuted = !state.speechMuted;
-  localStorage.setItem("jarvis-speech-muted", String(state.speechMuted));
-  applyMuteState();
-  if (state.speechMuted) {
-    els.ttsAudioPlayer.onended = null; // stop the playback queue, don't let it continue silently
-    els.ttsAudioPlayer.pause();
-    if ("speechSynthesis" in window) window.speechSynthesis.cancel();
-    setOrbState("idle");
-  }
-});
 
 // ---------------- Voice: speech recognition (push-to-talk) ----------------
 
@@ -2102,7 +2211,6 @@ els.micBtn.addEventListener("touchend", (e) => {
   initOrbCanvas();
   startOrbLoop();
   initTheme();
-  applyMuteState();
   await loadConversations();
   showEmptyState();
 })();
