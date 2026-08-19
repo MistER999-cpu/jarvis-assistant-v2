@@ -6,7 +6,7 @@
 // no rate limits, more robotic) instead of Groq's Orpheus TTS (higher quality,
 // costs API quota). Handy for testing without burning the daily TTS budget —
 // flip back to false once you're done iterating.
-const USE_BROWSER_TTS = true;
+const USE_BROWSER_TTS = false;
 
 const state = {
   currentConversationId: null,
