@@ -315,22 +315,13 @@ body {
    a reply streams in. Speaking: a faster, brighter pulse driven by real TTS
    playback state (see .orb-speaking / .orb-thinking toggled from JS). */
 
-.header-orb {
-  width: 20px;
-  height: 20px;
-  border-radius: 50%;
+/* Landing slot in the chat header. The orb is moved into this element once a
+   conversation starts, so it shrinks and relocates rather than disappearing
+   with the empty state. */
+.orb-dock {
+  display: flex;
+  align-items: center;
   flex-shrink: 0;
-  background: conic-gradient(from 180deg, var(--grad-start), var(--grad-mid), var(--grad-end), var(--grad-start));
-  box-shadow: 0 0 0 rgba(0,0,0,0);
-  transition: box-shadow 0.3s ease;
-}
-
-.header-orb.orb-thinking {
-  animation: orb-pulse-soft 2.2s ease-in-out infinite;
-}
-
-.header-orb.orb-speaking {
-  animation: orb-pulse-strong 0.9s ease-in-out infinite;
 }
 
 .hero-orb {
@@ -373,11 +364,31 @@ body {
   opacity: 0;
 }
 
+/* Docked state: same element, same animations, smaller. Sizes are the only
+   thing that changes, which is why the pulse keyframes below animate transform
+   and never box-shadow — a blur radius tuned for a 104px orb would swamp a
+   26px one. Intensity lives on the halo instead, which scales with the orb. */
+.hero-orb.orb-docked {
+  width: 26px;
+  height: 26px;
+  margin-bottom: 0;
+}
+
+.hero-orb.orb-docked .hero-orb-core {
+  width: 26px;
+  height: 26px;
+  box-shadow: 0 2px 8px -2px var(--orb-glow);
+}
+
+.hero-orb.orb-docked::before { inset: -40%; opacity: 0.4; }
+
 .hero-orb.orb-thinking .hero-orb-core { animation: orb-drift 8s ease-in-out infinite, orb-pulse-soft 2.2s ease-in-out infinite; }
 .hero-orb.orb-thinking .hero-orb-ring { animation: orb-ring-expand 2.2s ease-out infinite; }
+.hero-orb.orb-thinking::before { animation: orb-halo-soft 2.2s ease-in-out infinite; }
 
-.hero-orb.orb-speaking .hero-orb-core { animation: orb-pulse-strong 0.9s ease-in-out infinite; }
+.hero-orb.orb-speaking .hero-orb-core { animation: orb-drift 8s ease-in-out infinite, orb-pulse-strong 0.9s ease-in-out infinite; }
 .hero-orb.orb-speaking .hero-orb-ring { animation: orb-ring-expand 0.9s ease-out infinite; }
+.hero-orb.orb-speaking::before { animation: orb-halo-strong 0.9s ease-in-out infinite; }
 
 @keyframes orb-drift {
   0%, 100% { filter: hue-rotate(0deg); }
@@ -385,13 +396,23 @@ body {
 }
 
 @keyframes orb-pulse-soft {
-  0%, 100% { transform: scale(1); box-shadow: 0 8px 40px -8px var(--orb-glow); }
-  50% { transform: scale(1.045); box-shadow: 0 8px 52px -6px var(--orb-glow); }
+  0%, 100% { transform: scale(1); }
+  50% { transform: scale(1.045); }
 }
 
 @keyframes orb-pulse-strong {
-  0%, 100% { transform: scale(1); box-shadow: 0 8px 44px -6px var(--orb-glow); }
-  50% { transform: scale(1.09); box-shadow: 0 10px 64px -4px var(--orb-glow); }
+  0%, 100% { transform: scale(1); }
+  50% { transform: scale(1.09); }
+}
+
+@keyframes orb-halo-soft {
+  0%, 100% { opacity: 0.5; }
+  50% { opacity: 0.72; }
+}
+
+@keyframes orb-halo-strong {
+  0%, 100% { opacity: 0.55; }
+  50% { opacity: 0.95; }
 }
 
 @keyframes orb-ring-expand {
@@ -400,7 +421,7 @@ body {
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .header-orb, .hero-orb-core, .hero-orb-ring { animation: none !important; }
+  .hero-orb-core, .hero-orb-ring, .hero-orb::before { animation: none !important; }
 }
 
 .messages {

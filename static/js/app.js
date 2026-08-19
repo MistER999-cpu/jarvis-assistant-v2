@@ -47,7 +47,7 @@ const els = {
   composerHint: document.getElementById("composerHint"),
   ttsAudioPlayer: document.getElementById("ttsAudioPlayer"),
   chatTitleHeader: document.getElementById("chatTitleHeader"),
-  headerOrb: document.getElementById("headerOrb"),
+  orbDock: document.getElementById("orbDock"),
   heroOrb: document.getElementById("heroOrb"),
   themeToggle: document.getElementById("themeToggle"),
   sunIcon: document.getElementById("sunIcon"),
@@ -295,6 +295,9 @@ async function openConversation(convId) {
   const res = await fetch(`/api/conversations/${convId}`);
   const conv = await res.json();
 
+  // Dock the orb before the empty state is hidden and detached, so it stays on
+  // screen instead of going down with it.
+  placeOrb(false);
   els.emptyState.style.display = "none";
   els.messages.innerHTML = "";
   els.chatTitleHeader.textContent = conv.title;
@@ -315,6 +318,7 @@ function showEmptyState() {
   els.messages.appendChild(els.emptyState);
   els.emptyState.style.display = "flex";
   els.chatTitleHeader.textContent = "Jarvis";
+  placeOrb(true);
 }
 
 els.newChatBtn.addEventListener("click", async () => {
@@ -433,6 +437,9 @@ function enhanceCodeBlocks(container) {
 }
 
 function renderMessage(role, content, messageId, timestamp, imageData) {
+  // Same reason as in openConversation: move the orb out before its container
+  // is hidden.
+  placeOrb(false);
   els.emptyState.style.display = "none";
 
   const tpl = role === "user" ? userMsgTpl : assistantMsgTpl;
@@ -704,18 +711,44 @@ function setStreamingState(isStreaming) {
 // ---------------- Orb (signature visual) ----------------
 
 /**
- * Drives both orb instances (header + empty-state hero) from real app state:
+ * Drives the orb from real app state:
  *  - "thinking": a reply is streaming in
  *  - "speaking": TTS audio is actively playing
  *  - "idle": neither — calm, static gradient
  * Speaking takes priority over thinking if somehow both are true briefly.
+ * Only ever changes animation intensity — never visibility or opacity.
  */
 function setOrbState(mode) {
-  [els.headerOrb, els.heroOrb].forEach((orb) => {
-    if (!orb) return;
-    orb.classList.toggle("orb-thinking", mode === "thinking");
-    orb.classList.toggle("orb-speaking", mode === "speaking");
-  });
+  if (!els.heroOrb) return;
+  els.heroOrb.classList.toggle("orb-thinking", mode === "thinking");
+  els.heroOrb.classList.toggle("orb-speaking", mode === "speaking");
+}
+
+/**
+ * Moves the orb between its two homes. There is one orb element, not two: on
+ * the empty state it is the full-size centrepiece, and once a conversation
+ * starts it shrinks and docks in the chat header.
+ *
+ * It has to physically move because the empty state is hidden wholesale
+ * (display: none) the moment a message renders — an orb parked inside it would
+ * vanish with it, which is exactly the bug this avoids. Animation classes ride
+ * along on the element, so a state set while docked survives the move.
+ */
+function placeOrb(landing) {
+  if (!els.heroOrb) return;
+  const target = landing ? els.emptyState : els.orbDock;
+  if (!target) return;
+
+  els.heroOrb.classList.toggle("orb-docked", !landing);
+
+  if (landing) {
+    // Back to the top of the empty state, above the title.
+    if (els.heroOrb.parentElement !== target || target.firstChild !== els.heroOrb) {
+      target.insertBefore(els.heroOrb, target.firstChild);
+    }
+  } else if (els.heroOrb.parentElement !== target) {
+    target.appendChild(els.heroOrb);
+  }
 }
 
 // ---------------- Image attachment ----------------
