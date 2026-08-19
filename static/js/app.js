@@ -748,24 +748,31 @@ const orbView = {
 let orbSpin = 0.6;
 
 /**
- * Per-state motion. `amp` is radial displacement as a fraction of the sphere
- * radius, `freq` how many wave crests wrap the sphere, `speed` how fast they
- * travel, `spin` the Y rotation in radians/second.
+ * Per-state motion.
+ *   amp        radial displacement as a fraction of the sphere radius
+ *   freq       how many standing-wave crests wrap the sphere
+ *   speed      how fast those crests travel
+ *   spin       Y rotation in radians/second
+ *   sweep      strength of a band that travels pole to pole, on top of the
+ *              standing waves; this is what makes thinking read as *processing*
+ *              rather than as a faster idle
+ *   sweepSpeed how often that band crosses
  *
- * thinking and speaking are placeholders in this stage and deliberately match
- * idle — they get their own character in stages 3 and 4.
+ * speaking is provisional here: it borrows thinking's shape so the state is at
+ * least distinguishable, and stage 4 replaces its amplitude with live audio.
  */
 const ORB_MOTION = {
-  idle: { amp: 0.028, freq: 2.4, speed: 0.5, spin: 0.11 },
-  thinking: { amp: 0.028, freq: 2.4, speed: 0.5, spin: 0.11 },
-  speaking: { amp: 0.028, freq: 2.4, speed: 0.5, spin: 0.11 },
+  idle: { amp: 0.028, freq: 2.4, speed: 0.5, spin: 0.11, sweep: 0, sweepSpeed: 0.25 },
+  thinking: { amp: 0.055, freq: 3.2, speed: 1.7, spin: 0.30, sweep: 0.085, sweepSpeed: 0.5 },
+  speaking: { amp: 0.062, freq: 3.4, speed: 2.0, spin: 0.34, sweep: 0.095, sweepSpeed: 0.6 },
 };
 
 let orbMode = "idle";
 
 // Live values, eased toward the target each frame so a state change glides
 // instead of snapping.
-const orbMotion = { amp: 0.028, freq: 2.4, speed: 0.5, spin: 0.11 };
+const orbMotion = { amp: 0.028, freq: 2.4, speed: 0.5, spin: 0.11, sweep: 0, sweepSpeed: 0.25 };
+const ORB_MOTION_KEYS = ["amp", "freq", "speed", "spin", "sweep", "sweepSpeed"];
 
 const orbAnim = {
   rafId: null,
@@ -774,6 +781,114 @@ const orbAnim = {
   time: 0, // seconds of animation elapsed; only advances while visible
   frame: 0,
 };
+
+// Values actually handed to the renderer: orbMotion with the speaking-state
+// audio gain folded in. Kept separate so the eased base parameters aren't
+// overwritten by a loud moment.
+const orbRender = { amp: 0, freq: 0, speed: 0, sweep: 0, sweepSpeed: 0 };
+
+/**
+ * Live analysis of the TTS <audio> element. Only the server-side (Orpheus) path
+ * produces a stream we can tap; SpeechSynthesis renders straight to the output
+ * device with nothing to attach an AnalyserNode to, so that path falls back to
+ * choreography (see orbSpeechFallbackLevel).
+ */
+const orbAudio = {
+  ctx: null,
+  analyser: null,
+  source: null, // created at most once per element — see ensureOrbAudio
+  bins: null,
+  level: 0, // smoothed 0..1, drives the speaking-state gain
+  failed: false,
+};
+
+/**
+ * Builds the analyser graph, once, and only when it is safe to do so.
+ *
+ * Order matters: createMediaElementSource permanently reroutes the element's
+ * audio through the graph, so if the context were suspended (autoplay policy)
+ * the reroute would silence TTS with no way to undo it. The context is
+ * therefore resumed *first*, and the element is only tapped once it is
+ * confirmed running.
+ */
+async function ensureOrbAudio() {
+  if (orbAudio.analyser) return true;
+  if (orbAudio.failed) return false;
+
+  const AudioCtor = window.AudioContext || window.webkitAudioContext;
+  if (!AudioCtor || !els.ttsAudioPlayer) {
+    orbAudio.failed = true;
+    return false;
+  }
+
+  try {
+    if (!orbAudio.ctx) orbAudio.ctx = new AudioCtor();
+    if (orbAudio.ctx.state === "suspended") await orbAudio.ctx.resume();
+    if (orbAudio.ctx.state !== "running") return false; // retry on a later clip
+
+    const source = orbAudio.ctx.createMediaElementSource(els.ttsAudioPlayer);
+    const analyser = orbAudio.ctx.createAnalyser();
+    analyser.fftSize = 256;
+    // Some smoothing in the node itself; the rest is done per frame. Without
+    // it the level is jumpy enough to look like noise rather than speech.
+    analyser.smoothingTimeConstant = 0.7;
+
+    source.connect(analyser);
+    // The tap replaces the element's own output path, so the graph has to
+    // reach the speakers itself or playback becomes silent.
+    analyser.connect(orbAudio.ctx.destination);
+
+    orbAudio.source = source;
+    orbAudio.analyser = analyser;
+    // fftSize, not frequencyBinCount: getByteTimeDomainData fills one sample
+    // per fftSize point, and a short buffer would silently truncate the read.
+    orbAudio.bins = new Uint8Array(analyser.fftSize);
+    return true;
+  } catch (err) {
+    // Most likely a second createMediaElementSource call on the same element,
+    // which throws. Voice still works; the orb just uses the fallback.
+    orbAudio.failed = true;
+    return false;
+  }
+}
+
+/**
+ * Current loudness, 0..1, as RMS of the waveform.
+ *
+ * Deliberately time-domain rather than an average over frequency bins: voice
+ * energy is concentrated in a narrow low/mid range, so averaging it across the
+ * spectrum divides a few loud bins by a lot of empty ones and reports a
+ * fraction of the real loudness. RMS measures the amplitude actually leaving
+ * the speakers, whatever shape the spectrum happens to be.
+ */
+function orbAudioLevel() {
+  const analyser = orbAudio.analyser;
+  if (!analyser) return null;
+
+  analyser.getByteTimeDomainData(orbAudio.bins);
+  let sumSquares = 0;
+  for (let i = 0; i < orbAudio.bins.length; i++) {
+    const v = (orbAudio.bins[i] - 128) / 128; // byte samples centre on 128
+    sumSquares += v * v;
+  }
+  const rms = Math.sqrt(sumSquares / orbAudio.bins.length);
+  // Speech sits well below full scale; lift it so normal delivery uses most of
+  // the range instead of barely moving the field.
+  return Math.min(1, rms * 1.8);
+}
+
+/**
+ * Stand-in level for the browser-speech path. Three incommensurate sines land
+ * roughly in the syllable/phrase rhythm range and never line up into an
+ * obvious loop, which reads as speech far better than a single pulse.
+ */
+function orbSpeechFallbackLevel(t) {
+  const v = 0.5 +
+    Math.sin(t * 7.3) * 0.22 +
+    Math.sin(t * 11.9 + 1.3) * 0.13 +
+    Math.sin(t * 3.1 + 0.7) * 0.12;
+  return Math.max(0, Math.min(1, v));
+}
 
 function orbPrefersReducedMotion() {
   return typeof window.matchMedia === "function" &&
@@ -867,6 +982,14 @@ function drawOrb(spin, time, motion) {
   const amp = motion ? motion.amp : 0;
   const freq = motion ? motion.freq : 0;
   const phase = motion ? time * motion.speed : 0;
+  const sweep = motion ? motion.sweep : 0;
+
+  // The sweep band's centre travels beyond both poles (-1.4 .. 1.4) so it fully
+  // enters and exits rather than snapping back while still over the sphere.
+  const sweepCenter = sweep > 0.001
+    ? ((time * motion.sweepSpeed) % 2.8) - 1.4
+    : 0;
+  const SWEEP_SIGMA2 = 2 * 0.3 * 0.3; // denominator of the gaussian falloff
 
   ctx.clearRect(0, 0, canvas.width, canvas.height);
   ctx.save();
@@ -891,7 +1014,7 @@ function drawOrb(spin, time, motion) {
   // runs ~60x a second for the life of the page, so per-frame object churn
   // would hand the GC steady work for no reason.
   const projected = orbView.projected;
-  while (projected.length < dots.length) projected.push({ sx: 0, sy: 0, depth: 0, persp: 1, shade: 0 });
+  while (projected.length < dots.length) projected.push({ sx: 0, sy: 0, depth: 0, persp: 1, shade: 0, lift: 0 });
   projected.length = dots.length;
 
   for (let i = 0; i < dots.length; i++) {
@@ -900,10 +1023,20 @@ function drawOrb(spin, time, motion) {
     // Two out-of-phase waves along different axes: a single one reads as a
     // mechanical throb, while two crossing at different rates never quite
     // repeat and look organic.
-    const wave = amp === 0
+    let wave = amp === 0
       ? 0
       : Math.sin(d.y * freq + phase) * amp +
         Math.sin(d.x * freq * 0.7 - phase * 0.8) * amp * 0.5;
+
+    // Travelling band: a gaussian centred on the sweep position, so dots near
+    // it bulge outward and brighten as it passes over them.
+    let lift = 0;
+    if (sweep > 0.001) {
+      const offset = d.y - sweepCenter;
+      lift = Math.exp(-(offset * offset) / SWEEP_SIGMA2);
+      wave += lift * sweep;
+    }
+
     const swell = 1 + wave;
 
     const dx = d.x * swell;
@@ -923,6 +1056,7 @@ function drawOrb(spin, time, motion) {
     p.depth = rz2;
     p.persp = persp;
     p.shade = (rz2 + 1) / 2; // 0 at the back, 1 at the front
+    p.lift = lift;
   }
 
   // Painter's algorithm: back to front, so near dots overlap far ones.
@@ -936,8 +1070,10 @@ function drawOrb(spin, time, motion) {
     // Dropping the back hemisphere leaves a legible little cluster.
     if (sparse && p.shade < 0.42) continue;
     // Blend along the gradient by depth, so the front of the sphere reads
-    // brighter and warmer than the back.
-    const t = p.shade;
+    // brighter and warmer than the back. The sweep band pushes dots further
+    // along the same ramp, so the crest lights up without introducing a colour
+    // that isn't already in the theme.
+    const t = Math.min(1, p.shade + p.lift * 0.55);
     const r = Math.round(from[0] + (to[0] - from[0]) * t);
     const g = Math.round(from[1] + (to[1] - from[1]) * t);
     const b = Math.round(from[2] + (to[2] - from[2]) * t);
@@ -945,10 +1081,11 @@ function drawOrb(spin, time, motion) {
     // Depth has to drive size as well as opacity. With uniform dots the far
     // hemisphere fills the middle and the whole thing reads as a flat disc;
     // shrinking and fading the back is what sells the shell.
-    const depthScale = 0.34 + t * 0.66;
+    const depthScale = 0.34 + p.shade * 0.66 + p.lift * 0.3;
     // Sparse mode already culls the back, so its remaining dots should stay
     // solid rather than inheriting the landing orb's deep fade.
-    ctx.globalAlpha = sparse ? 0.55 + t * 0.45 : 0.14 + t * 0.86;
+    const baseAlpha = sparse ? 0.55 + p.shade * 0.45 : 0.14 + p.shade * 0.86;
+    ctx.globalAlpha = Math.min(1, baseAlpha + p.lift * 0.35);
     ctx.fillStyle = `rgb(${r}, ${g}, ${b})`;
     ctx.beginPath();
     ctx.arc(p.sx, p.sy, Math.max(0.35, baseDot * p.persp * depthScale), 0, Math.PI * 2);
@@ -981,17 +1118,42 @@ function orbFrame(ts) {
   // state glides rather than snapping. ~4/sec converges in well under a second.
   const target = ORB_MOTION[orbMode] || ORB_MOTION.idle;
   const k = Math.min(1, dt * 4);
-  orbMotion.amp += (target.amp - orbMotion.amp) * k;
-  orbMotion.freq += (target.freq - orbMotion.freq) * k;
-  orbMotion.speed += (target.speed - orbMotion.speed) * k;
-  orbMotion.spin += (target.spin - orbMotion.spin) * k;
+  for (let i = 0; i < ORB_MOTION_KEYS.length; i++) {
+    const key = ORB_MOTION_KEYS[i];
+    orbMotion[key] += (target[key] - orbMotion[key]) * k;
+  }
 
   orbSpin += dt * orbMotion.spin;
+
+  // Speaking is the only state driven by something outside the animation: real
+  // loudness when the TTS element is playing, choreography when it isn't.
+  if (orbMode === "speaking") {
+    const live = orbAudio.analyser && els.ttsAudioPlayer && !els.ttsAudioPlayer.paused
+      ? orbAudioLevel()
+      : null;
+    const level = live === null ? orbSpeechFallbackLevel(orbAnim.time) : live;
+    // Fast attack so consonants register, slower release so the field settles
+    // between words instead of strobing.
+    const rate = level > orbAudio.level ? 22 : 7;
+    orbAudio.level += (level - orbAudio.level) * Math.min(1, dt * rate);
+  } else {
+    orbAudio.level += (0 - orbAudio.level) * Math.min(1, dt * 6);
+  }
+
+  // Audio scales displacement rather than replacing it: at silence the field
+  // settles to roughly half its nominal swell, and a loud syllable pushes it
+  // to a bit over double.
+  const gain = orbMode === "speaking" ? 0.45 + orbAudio.level * 1.85 : 1;
+  orbRender.amp = orbMotion.amp * gain;
+  orbRender.sweep = orbMotion.sweep * gain;
+  orbRender.freq = orbMotion.freq;
+  orbRender.speed = orbMotion.speed;
+  orbRender.sweepSpeed = orbMotion.sweepSpeed;
 
   // The docked orb is 26px of mostly-static dots; refreshing it every frame
   // buys nothing visible, so it runs at half rate.
   if (!orbView.sparse || orbAnim.frame % 2 === 0) {
-    drawOrb(orbSpin, orbAnim.time, orbMotion);
+    drawOrb(orbSpin, orbAnim.time, orbRender);
   }
 
   orbAnim.rafId = requestAnimationFrame(orbFrame);
@@ -1516,7 +1678,11 @@ function playAudioQueue(base64Clips) {
       });
     };
 
-    playNext();
+    // Attach the analyser before the first clip so the orb reacts from the
+    // opening syllable. Playback starts either way: if the graph cannot be
+    // built the orb falls back to choreography, but voice must never be
+    // blocked on a visual nicety.
+    ensureOrbAudio().then(playNext, playNext);
   });
 }
 
