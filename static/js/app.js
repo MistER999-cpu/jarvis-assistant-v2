@@ -47,7 +47,7 @@ const els = {
   composerHint: document.getElementById("composerHint"),
   ttsAudioPlayer: document.getElementById("ttsAudioPlayer"),
   chatTitleHeader: document.getElementById("chatTitleHeader"),
-  orbDock: document.getElementById("orbDock"),
+  composerOrbSlot: document.getElementById("composerOrbSlot"),
   heroOrb: document.getElementById("heroOrb"),
   themeToggle: document.getElementById("themeToggle"),
   sunIcon: document.getElementById("sunIcon"),
@@ -303,9 +303,9 @@ async function openConversation(convId) {
   const res = await fetch(`/api/conversations/${convId}`);
   const conv = await res.json();
 
-  // Dock the orb before the empty state is hidden and detached, so it stays on
+  // Move the orb before the empty state is hidden and detached, so it stays on
   // screen instead of going down with it.
-  placeOrb(false);
+  placeOrbAnimated(false);
   els.emptyState.style.display = "none";
   els.messages.innerHTML = "";
   els.chatTitleHeader.textContent = conv.title;
@@ -326,7 +326,7 @@ function showEmptyState() {
   els.messages.appendChild(els.emptyState);
   els.emptyState.style.display = "flex";
   els.chatTitleHeader.textContent = "Jarvis";
-  placeOrb(true);
+  placeOrbAnimated(true);
 }
 
 els.newChatBtn.addEventListener("click", async () => {
@@ -447,7 +447,7 @@ function enhanceCodeBlocks(container) {
 function renderMessage(role, content, messageId, timestamp, imageData) {
   // Same reason as in openConversation: move the orb out before its container
   // is hidden.
-  placeOrb(false);
+  placeOrbAnimated(false);
   els.emptyState.style.display = "none";
 
   const tpl = role === "user" ? userMsgTpl : assistantMsgTpl;
@@ -728,10 +728,53 @@ function setStreamingState(isStreaming) {
  * gets the full field, the 26px docked one gets far fewer, larger dots. Packing
  * landing density into 26px reads as noise, not a sphere.
  */
-const ORB_LANDING_DOTS = 260;
-const ORB_DOCKED_DOTS = 34;
-const ORB_DOCKED_MAX_PX = 48; // below this the orb switches to the sparse field
 const ORB_CAMERA_Z = 2.7; // perspective distance in sphere radii; larger = flatter
+
+/**
+ * Detail tiers, chosen from the rendered box size. Dot count cannot simply
+ * scale with area: landing density at 56px reads as noise, while the fat
+ * low-count field that keeps a tiny orb legible looks crude at 56px. Each tier
+ * therefore carries its own count, dot radius and shading.
+ *
+ *   dotScale  dot radius as a fraction of the box
+ *   fill      how much of the box the sphere spans
+ *   cullBack  drop the far hemisphere — only worth it when there are too few
+ *             pixels to imply a transparent shell at all
+ */
+/*
+ * `fill` has to leave room for the *swollen, projected* sphere, not the resting
+ * one. Two multipliers stack on top of the radius:
+ *
+ *   1.076  the widest projected point is not the equator. Perspective
+ *          magnifies nearer dots, and sin0 x Z/(Z - cos0) peaks around
+ *          0 = 67 degrees, pushing the silhouette ~7.6% past the equator.
+ *   1.26   ORB_MAX_SWELL at a speaking peak.
+ *
+ * So the budget is centre x fill x 1.076 x 1.26 + dot radius < centre, which
+ * caps fill near 0.71 at the full tier. Larger clips the loudest frames into
+ * flat-sided blobs against the canvas edge.
+ */
+const ORB_DETAIL = {
+  full: { minPx: 120, dots: 260, dotScale: 0.0125, fill: 0.66, cullBack: false },
+  mid: { minPx: 44, dots: 120, dotScale: 0.026, fill: 0.62, cullBack: false },
+  micro: { minPx: 0, dots: 34, dotScale: 0.078, fill: 0.56, cullBack: true },
+};
+
+/**
+ * Ceiling on radial displacement, as a fraction of the radius.
+ *
+ * Without it the wave is unbounded: a loud speaking peak multiplies amp and
+ * sweep by the audio gain and can push dots past 1.4x the radius, beyond the
+ * canvas edge, where they are silently clipped into flat-sided blobs. Every
+ * tier's `fill` is set so that fill x (1 + this) stays under 1.
+ */
+const ORB_MAX_SWELL = 0.26;
+
+function orbDetailFor(cssSize) {
+  if (cssSize >= ORB_DETAIL.full.minPx) return "full";
+  if (cssSize >= ORB_DETAIL.mid.minPx) return "mid";
+  return "micro";
+}
 
 const orbView = {
   canvas: null,
@@ -740,7 +783,7 @@ const orbView = {
   projected: [], // reused every frame; see drawOrb
   cssSize: 0,
   dpr: 1,
-  sparse: false,
+  detail: "full",
   palette: null,
 };
 
@@ -785,7 +828,77 @@ const orbAnim = {
 // Values actually handed to the renderer: orbMotion with the speaking-state
 // audio gain folded in. Kept separate so the eased base parameters aren't
 // overwritten by a loud moment.
-const orbRender = { amp: 0, freq: 0, speed: 0, sweep: 0, sweepSpeed: 0 };
+const orbRender = {
+  amp: 0, freq: 0, speed: 0, sweep: 0, sweepSpeed: 0,
+  // Hover attractor: a unit direction in rotated (screen-facing) space plus a
+  // strength, both eased. Dots facing it are pulled outward.
+  hover: 0, hx: 0, hy: 0, hz: 1,
+};
+
+/**
+ * Cursor attraction for the landing orb. The pointer is read as a direction on
+ * the sphere's front face; dots aligned with it bulge toward the cursor, which
+ * gives the same family of deformation as the thinking sweep but driven by the
+ * mouse instead of a clock.
+ *
+ * Only the landing orb responds. The floating one is 64px and deliberately
+ * pointer-transparent, so reacting to a cursor that cannot interact with it
+ * would just be noise near the composer.
+ */
+const ORB_HOVER_PULL = 0.16; // peak displacement, before the shared swell clamp
+const ORB_HOVER_FALLOFF = 1.6; // extra radii beyond the rim before it dies off
+
+const orbHover = {
+  strength: 0, // eased current
+  target: 0,
+  x: 0, y: 0, z: 1, // eased attractor direction
+  tx: 0, ty: 0, tz: 1,
+};
+
+function updateOrbHoverFromPointer(clientX, clientY) {
+  // Never for the small floating orb, and never under reduced motion.
+  if (!orbView.canvas || !els.heroOrb ||
+      els.heroOrb.classList.contains("orb-floating") ||
+      orbPrefersReducedMotion()) {
+    orbHover.target = 0;
+    return;
+  }
+
+  const rect = orbView.canvas.getBoundingClientRect();
+  if (!rect.width) {
+    orbHover.target = 0;
+    return;
+  }
+
+  const tier = ORB_DETAIL[orbView.detail] || ORB_DETAIL.full;
+  const radius = (rect.width / 2) * tier.fill; // the drawn sphere, not the box
+  const dx = (clientX - (rect.left + rect.width / 2)) / radius;
+  const dy = (clientY - (rect.top + rect.height / 2)) / radius;
+  const dist = Math.hypot(dx, dy);
+
+  // Full strength anywhere over the sphere, tapering to nothing a little way
+  // outside it, so the orb notices an approach rather than snapping on.
+  orbHover.target = Math.max(0, 1 - Math.max(0, dist - 1) / ORB_HOVER_FALLOFF);
+
+  if (dist > 1e-4) {
+    // Clamp to the rim: past the edge the attractor stays on the silhouette
+    // instead of flying off into space.
+    const reach = Math.min(1, dist);
+    orbHover.tx = (dx / dist) * reach;
+    orbHover.ty = (dy / dist) * reach; // screen y is down, and so is +y here
+    orbHover.tz = Math.sqrt(Math.max(0, 1 - orbHover.tx * orbHover.tx - orbHover.ty * orbHover.ty));
+  }
+}
+
+document.addEventListener("mousemove", (e) => {
+  updateOrbHoverFromPointer(e.clientX, e.clientY);
+});
+
+// Leaving the window entirely should release the orb rather than freezing it
+// mid-pull at the last known position.
+document.addEventListener("mouseleave", () => {
+  orbHover.target = 0;
+});
 
 /**
  * Live analysis of the TTS <audio> element. Only the server-side (Orpheus) path
@@ -853,28 +966,88 @@ async function ensureOrbAudio() {
 }
 
 /**
- * Current loudness, 0..1, as RMS of the waveform.
+ * Current loudness, 0..1, as RMS of an analyser's waveform.
  *
  * Deliberately time-domain rather than an average over frequency bins: voice
  * energy is concentrated in a narrow low/mid range, so averaging it across the
  * spectrum divides a few loud bins by a lot of empty ones and reports a
- * fraction of the real loudness. RMS measures the amplitude actually leaving
- * the speakers, whatever shape the spectrum happens to be.
+ * fraction of the real loudness. RMS measures the amplitude actually present,
+ * whatever shape the spectrum happens to be.
  */
-function orbAudioLevel() {
-  const analyser = orbAudio.analyser;
-  if (!analyser) return null;
-
-  analyser.getByteTimeDomainData(orbAudio.bins);
+function analyserRmsLevel(analyser, bins, gain) {
+  if (!analyser || !bins) return null;
+  analyser.getByteTimeDomainData(bins);
   let sumSquares = 0;
-  for (let i = 0; i < orbAudio.bins.length; i++) {
-    const v = (orbAudio.bins[i] - 128) / 128; // byte samples centre on 128
+  for (let i = 0; i < bins.length; i++) {
+    const v = (bins[i] - 128) / 128; // byte samples centre on 128
     sumSquares += v * v;
   }
-  const rms = Math.sqrt(sumSquares / orbAudio.bins.length);
+  return Math.min(1, Math.sqrt(sumSquares / bins.length) * gain);
+}
+
+function orbAudioLevel() {
   // Speech sits well below full scale; lift it so normal delivery uses most of
   // the range instead of barely moving the field.
-  return Math.min(1, rms * 1.8);
+  return analyserRmsLevel(orbAudio.analyser, orbAudio.bins, 1.8);
+}
+
+/**
+ * Live analysis of the user's own microphone, active only while recording.
+ *
+ * It reuses the stream startRecording already opened rather than calling
+ * getUserMedia again: a second request is a second permission surface, and two
+ * live captures of one device is wasteful. The MediaRecorder feeding
+ * transcription is untouched — this only reads the same stream alongside it.
+ */
+const orbMic = {
+  source: null,
+  analyser: null,
+  bins: null,
+  level: 0,
+  active: false,
+};
+
+async function attachOrbMic(stream) {
+  if (orbPrefersReducedMotion()) return;
+
+  try {
+    const AudioCtor = window.AudioContext || window.webkitAudioContext;
+    if (!AudioCtor) return;
+    if (!orbAudio.ctx) orbAudio.ctx = new AudioCtor();
+    if (orbAudio.ctx.state === "suspended") await orbAudio.ctx.resume();
+    if (orbAudio.ctx.state !== "running") return;
+
+    const source = orbAudio.ctx.createMediaStreamSource(stream);
+    const analyser = orbAudio.ctx.createAnalyser();
+    analyser.fftSize = 256;
+    analyser.smoothingTimeConstant = 0.6; // a touch snappier than the TTS tap
+
+    // Connected to the analyser and nowhere else. Routing a live microphone to
+    // the destination would put the user's own voice through their speakers
+    // and howl.
+    source.connect(analyser);
+
+    orbMic.source = source;
+    orbMic.analyser = analyser;
+    orbMic.bins = new Uint8Array(analyser.fftSize);
+    orbMic.active = true;
+  } catch (err) {
+    orbMic.active = false; // visualisation only — never let this break recording
+  }
+}
+
+function detachOrbMic() {
+  orbMic.active = false;
+  try {
+    if (orbMic.source) orbMic.source.disconnect();
+    if (orbMic.analyser) orbMic.analyser.disconnect();
+  } catch (err) {
+    /* already torn down */
+  }
+  orbMic.source = null;
+  orbMic.analyser = null;
+  orbMic.bins = null;
+  orbMic.level = 0;
 }
 
 /**
@@ -950,19 +1123,19 @@ function resizeOrbCanvas() {
   if (!orbView.canvas || !els.heroOrb) return;
 
   const rect = els.heroOrb.getBoundingClientRect();
-  const cssSize = Math.round(rect.width) || (els.heroOrb.classList.contains("orb-docked") ? 26 : 132);
+  const cssSize = Math.round(rect.width) || (els.heroOrb.classList.contains("orb-floating") ? 56 : 168);
   const dpr = Math.min(window.devicePixelRatio || 1, 2); // cap: 3x costs pixels for no visible gain
-  const sparse = cssSize <= ORB_DOCKED_MAX_PX;
+  const detail = orbDetailFor(cssSize);
 
-  if (orbView.cssSize === cssSize && orbView.dpr === dpr && orbView.sparse === sparse) return;
+  if (orbView.cssSize === cssSize && orbView.dpr === dpr && orbView.detail === detail) return;
 
   orbView.cssSize = cssSize;
   orbView.dpr = dpr;
-  orbView.sparse = sparse;
+  orbView.detail = detail;
   orbView.canvas.width = Math.max(1, Math.round(cssSize * dpr));
   orbView.canvas.height = Math.max(1, Math.round(cssSize * dpr));
 
-  const wanted = sparse ? ORB_DOCKED_DOTS : ORB_LANDING_DOTS;
+  const wanted = ORB_DETAIL[detail].dots;
   if (orbView.dots.length !== wanted) orbView.dots = buildSphereDots(wanted);
 
   // Repaint immediately so the new size is filled this frame rather than
@@ -976,8 +1149,9 @@ function resizeOrbCanvas() {
  * sphere undistorted, which is the reduced-motion path).
  */
 function drawOrb(spin, time, motion) {
-  const { ctx, canvas, dots, dpr, cssSize, sparse, palette } = orbView;
+  const { ctx, canvas, dots, dpr, cssSize, palette } = orbView;
   if (!ctx || !palette) return;
+  const tier = ORB_DETAIL[orbView.detail] || ORB_DETAIL.full;
 
   const amp = motion ? motion.amp : 0;
   const freq = motion ? motion.freq : 0;
@@ -991,17 +1165,22 @@ function drawOrb(spin, time, motion) {
     : 0;
   const SWEEP_SIGMA2 = 2 * 0.3 * 0.3; // denominator of the gaussian falloff
 
+  const hover = motion && motion.hover ? motion.hover : 0;
+  const hx = motion ? motion.hx : 0;
+  const hy = motion ? motion.hy : 0;
+  const hz = motion ? motion.hz : 1;
+
   ctx.clearRect(0, 0, canvas.width, canvas.height);
   ctx.save();
   ctx.scale(dpr, dpr);
 
   const center = cssSize / 2;
-  // Leave headroom so the sphere never touches the canvas edge; the docked orb
-  // is tiny enough that it can afford to fill more of its box.
-  const radius = center * (sparse ? 0.9 : 0.78);
-  // The docked orb needs proportionally much fatter dots: at 26px a
-  // landing-scale radius works out under a pixel and renders as faint dust.
-  const baseDot = sparse ? Math.max(1.1, cssSize * 0.078) : cssSize * 0.0135;
+  // Leave headroom so the sphere never touches the canvas edge; smaller orbs
+  // can afford to fill more of their box.
+  const radius = center * tier.fill;
+  // Smaller tiers need proportionally fatter dots: a landing-scale radius works
+  // out to well under a pixel at 56px and renders as faint dust.
+  const baseDot = Math.max(tier.cullBack ? 1.1 : 0.5, cssSize * tier.dotScale);
 
   const sin = Math.sin(spin);
   const cos = Math.cos(spin);
@@ -1037,17 +1216,27 @@ function drawOrb(spin, time, motion) {
       wave += lift * sweep;
     }
 
-    const swell = 1 + wave;
+    // Rotate the unit direction first. The swell is a scalar so scaling before
+    // or after rotation is identical, but doing it in this order leaves the
+    // rotated surface normal available for the hover attractor below.
+    const spunX = d.x * cos - d.z * sin;
+    const spunZ = d.x * sin + d.z * cos;
+    const ux = spunX;
+    const uy = d.y * tiltCos - spunZ * tiltSin;
+    const uz = d.y * tiltSin + spunZ * tiltCos;
 
-    const dx = d.x * swell;
-    const dy = d.y * swell;
-    const dz = d.z * swell;
+    // Cursor pull: strongest for dots facing the pointer, cubed so the bulge
+    // stays local instead of inflating the whole hemisphere.
+    if (hover > 0.0001) {
+      const align = ux * hx + uy * hy + uz * hz;
+      if (align > 0) wave += align * align * align * hover;
+    }
 
-    // Rotate about Y, then tilt about X.
-    const rx = dx * cos - dz * sin;
-    const rz = dx * sin + dz * cos;
-    const ry = dy * tiltCos - rz * tiltSin;
-    const rz2 = dy * tiltSin + rz * tiltCos;
+    const swell = 1 + Math.max(-ORB_MAX_SWELL, Math.min(ORB_MAX_SWELL, wave));
+
+    const rx = ux * swell;
+    const ry = uy * swell;
+    const rz2 = uz * swell;
 
     const persp = ORB_CAMERA_Z / (ORB_CAMERA_Z - rz2);
     const p = projected[i];
@@ -1065,10 +1254,10 @@ function drawOrb(spin, time, motion) {
   const { from, to } = palette;
   for (let i = 0; i < projected.length; i++) {
     const p = projected[i];
-    // At 26px there are too few pixels to imply a transparent shell: far-side
-    // dots just land between near ones and the whole thing reads as static.
-    // Dropping the back hemisphere leaves a legible little cluster.
-    if (sparse && p.shade < 0.42) continue;
+    // At the smallest tier there are too few pixels to imply a transparent
+    // shell: far-side dots just land between near ones and the whole thing
+    // reads as static. Dropping the back hemisphere leaves a legible cluster.
+    if (tier.cullBack && p.shade < 0.42) continue;
     // Blend along the gradient by depth, so the front of the sphere reads
     // brighter and warmer than the back. The sweep band pushes dots further
     // along the same ramp, so the crest lights up without introducing a colour
@@ -1082,9 +1271,9 @@ function drawOrb(spin, time, motion) {
     // hemisphere fills the middle and the whole thing reads as a flat disc;
     // shrinking and fading the back is what sells the shell.
     const depthScale = 0.34 + p.shade * 0.66 + p.lift * 0.3;
-    // Sparse mode already culls the back, so its remaining dots should stay
-    // solid rather than inheriting the landing orb's deep fade.
-    const baseAlpha = sparse ? 0.55 + p.shade * 0.45 : 0.14 + p.shade * 0.86;
+    // A culled field has no far side to imply, so its dots stay solid rather
+    // than inheriting the full field's deep back-to-front fade.
+    const baseAlpha = tier.cullBack ? 0.55 + p.shade * 0.45 : 0.14 + p.shade * 0.86;
     ctx.globalAlpha = Math.min(1, baseAlpha + p.lift * 0.35);
     ctx.fillStyle = `rgb(${r}, ${g}, ${b})`;
     ctx.beginPath();
@@ -1140,19 +1329,49 @@ function orbFrame(ts) {
     orbAudio.level += (0 - orbAudio.level) * Math.min(1, dt * 6);
   }
 
+  // The user's own voice while holding the mic. Unlike the speaking state this
+  // rides on top of whatever mode is current, so the orb answers the moment
+  // they start talking rather than waiting for a reply.
+  if (orbMic.active && state.isRecording) {
+    const mic = analyserRmsLevel(orbMic.analyser, orbMic.bins, 2.1) || 0;
+    const rate = mic > orbMic.level ? 24 : 8;
+    orbMic.level += (mic - orbMic.level) * Math.min(1, dt * rate);
+  } else if (orbMic.level > 0) {
+    orbMic.level += (0 - orbMic.level) * Math.min(1, dt * 6);
+  }
+
   // Audio scales displacement rather than replacing it: at silence the field
   // settles to roughly half its nominal swell, and a loud syllable pushes it
   // to a bit over double.
-  const gain = orbMode === "speaking" ? 0.45 + orbAudio.level * 1.85 : 1;
-  orbRender.amp = orbMotion.amp * gain;
-  orbRender.sweep = orbMotion.sweep * gain;
+  const speakGain = orbMode === "speaking" ? 0.45 + orbAudio.level * 1.85 : 1;
+  // Mic gain starts at 1 so an idle orb looks untouched until a voice arrives,
+  // rather than visibly bracing the instant the button is pressed.
+  const micGain = 1 + orbMic.level * 1.8;
+
+  orbRender.amp = orbMotion.amp * speakGain * micGain;
+  // Idle carries no sweep, so scaling it would leave the mic with nothing to
+  // show; the voice supplies its own travelling ripple instead.
+  orbRender.sweep = Math.max(orbMotion.sweep * speakGain, orbMic.level * 0.09);
   orbRender.freq = orbMotion.freq;
   orbRender.speed = orbMotion.speed;
   orbRender.sweepSpeed = orbMotion.sweepSpeed;
 
-  // The docked orb is 26px of mostly-static dots; refreshing it every frame
-  // buys nothing visible, so it runs at half rate.
-  if (!orbView.sparse || orbAnim.frame % 2 === 0) {
+  // Ease both the strength and the direction: easing strength alone still lets
+  // the bulge teleport across the sphere when the pointer jumps.
+  const hoverK = Math.min(1, dt * 7);
+  orbHover.strength += (orbHover.target - orbHover.strength) * hoverK;
+  orbHover.x += (orbHover.tx - orbHover.x) * hoverK;
+  orbHover.y += (orbHover.ty - orbHover.y) * hoverK;
+  orbHover.z += (orbHover.tz - orbHover.z) * hoverK;
+
+  orbRender.hover = orbHover.strength * ORB_HOVER_PULL;
+  orbRender.hx = orbHover.x;
+  orbRender.hy = orbHover.y;
+  orbRender.hz = orbHover.z;
+
+  // The smallest tier is a handful of near-static dots; refreshing it every
+  // frame buys nothing visible, so it runs at half rate.
+  if (orbView.detail !== "micro" || orbAnim.frame % 2 === 0) {
     drawOrb(orbSpin, orbAnim.time, orbRender);
   }
 
@@ -1226,21 +1445,23 @@ function setOrbState(mode) {
 /**
  * Moves the orb between its two homes. There is one orb element, not two: on
  * the empty state it is the full-size centrepiece, and once a conversation
- * starts it shrinks and docks in the chat header.
+ * starts it shrinks and floats just above the composer, where it stays for the
+ * whole conversation rather than only while thinking or speaking.
  *
  * It has to physically move because the empty state is hidden wholesale
  * (display: none) the moment a message renders — an orb parked inside it would
- * vanish with it, which is exactly the bug this avoids. Animation classes ride
- * along on the element, so a state set while docked survives the move.
+ * vanish with it. Animation classes ride along on the element, so a state set
+ * while floating survives the move.
  */
-function placeOrb(landing) {
+function placeOrb(landing, deferResize) {
   if (!els.heroOrb) return;
-  const target = landing ? els.emptyState : els.orbDock;
+  const target = landing ? els.emptyState : els.composerOrbSlot;
   if (!target) return;
 
-  els.heroOrb.classList.toggle("orb-docked", !landing);
-  // The box just changed size; the canvas backing store has to follow.
-  resizeOrbCanvas();
+  els.heroOrb.classList.toggle("orb-floating", !landing);
+  // The box just changed size; the canvas backing store has to follow. The
+  // transition defers this — see placeOrbAnimated.
+  if (!deferResize) resizeOrbCanvas();
 
   if (landing) {
     // Back to the top of the empty state, above the title.
@@ -1249,6 +1470,68 @@ function placeOrb(landing) {
     }
   } else if (els.heroOrb.parentElement !== target) {
     target.appendChild(els.heroOrb);
+  }
+}
+
+/**
+ * Same relocation, but flown rather than cut.
+ *
+ * A FLIP: measure where the orb is, move it, measure where it landed, then play
+ * the inverse transform back to identity. Animating the real move this way
+ * avoids maintaining a second ghost element that has to be kept in sync with
+ * the live one.
+ *
+ * The canvas resolution is handled around the flight rather than during it.
+ * Whichever end is larger, the backing store is sized for it before the
+ * transform runs, so the canvas is only ever scaled *down* mid-flight —
+ * scaling a 64px canvas up to 224 would smear the dots for the whole
+ * animation. Shrinking therefore keeps its big buffer until the end; growing
+ * takes the big buffer up front.
+ */
+const ORB_FLIGHT_MS = 560;
+
+function placeOrbAnimated(landing) {
+  if (!els.heroOrb) return;
+
+  // Reduced motion gets the instant swap, same as every other orb animation.
+  if (orbPrefersReducedMotion() || typeof els.heroOrb.animate !== "function") {
+    placeOrb(landing);
+    return;
+  }
+
+  const first = els.heroOrb.getBoundingClientRect();
+  if (!first.width) {
+    placeOrb(landing);
+    return;
+  }
+
+  const growing = landing;
+  placeOrb(landing, !growing);
+
+  const last = els.heroOrb.getBoundingClientRect();
+  const scale = last.width ? first.width / last.width : 1;
+  const dx = first.left + first.width / 2 - (last.left + last.width / 2);
+  const dy = first.top + first.height / 2 - (last.top + last.height / 2);
+
+  // Nothing actually moved — this is a repeat call (every message after the
+  // first), so there is no flight to play.
+  if (!last.width || (Math.abs(dx) < 1 && Math.abs(dy) < 1 && Math.abs(scale - 1) < 0.02)) {
+    if (!growing) resizeOrbCanvas();
+    return;
+  }
+
+  const flight = els.heroOrb.animate(
+    [
+      { transform: `translate(${dx}px, ${dy}px) scale(${scale})` },
+      { transform: "translate(0px, 0px) scale(1)" },
+    ],
+    { duration: ORB_FLIGHT_MS, easing: "cubic-bezier(0.22, 1, 0.36, 1)" }
+  );
+
+  if (!growing) {
+    // Drop to the smaller buffer once it is actually being displayed small.
+    // Both branches resize, so an interrupted flight still settles correctly.
+    flight.finished.then(() => resizeOrbCanvas(), () => resizeOrbCanvas());
   }
 }
 
@@ -1375,20 +1658,6 @@ function autoResizeTextarea() {
 }
 
 els.messageInput.addEventListener("input", autoResizeTextarea);
-
-// Empty-state suggestion cards seed the composer and hand over the caret; they
-// deliberately do not send, so the starter can be edited first. Bound once —
-// showEmptyState() detaches and re-appends this same element rather than
-// rebuilding it, so the listeners survive.
-document.querySelectorAll(".suggestion-card").forEach((card) => {
-  card.addEventListener("click", () => {
-    const starter = card.dataset.prompt || "";
-    els.messageInput.value = starter;
-    autoResizeTextarea();
-    els.messageInput.focus();
-    els.messageInput.setSelectionRange(starter.length, starter.length);
-  });
-});
 
 els.messageInput.addEventListener("keydown", (e) => {
   if (e.key === "Enter" && !e.shiftKey) {
@@ -1740,11 +2009,15 @@ async function startRecording() {
   });
 
   state.mediaRecorder.addEventListener("stop", () => {
+    detachOrbMic(); // release the tap before the tracks it reads are stopped
     stream.getTracks().forEach((track) => track.stop());
     handleRecordingStop();
   });
 
   state.mediaRecorder.start();
+  // Read the same stream for the orb. Deliberately not awaited: the analyser is
+  // decoration, and recording must not wait on an AudioContext resuming.
+  attachOrbMic(stream);
   state.isRecording = true;
   els.micBtn.classList.add("recording");
   setComposerHint("Recording… release to send.");

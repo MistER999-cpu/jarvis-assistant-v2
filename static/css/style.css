@@ -315,20 +315,31 @@ body {
    a reply streams in. Speaking: a faster, brighter pulse driven by real TTS
    playback state (see .orb-speaking / .orb-thinking toggled from JS). */
 
-/* Landing slot in the chat header. The orb is moved into this element once a
-   conversation starts, so it shrinks and relocates rather than disappearing
-   with the empty state. */
-.orb-dock {
+/* Home for the orb during a conversation: centred just above the composer
+   pill, where it stays visible for the whole session without ever overlapping
+   the input. pointer-events stays off so it cannot intercept clicks meant for
+   the composer or the messages scrolling behind it. */
+/* Two classes deep on purpose: `.composer > *` later in the file turns
+   pointer-events back on for the composer's children, and this has to outrank
+   it so the orb never steals a click from the input behind it. */
+.composer > .composer-orb-slot {
   display: flex;
-  align-items: center;
-  flex-shrink: 0;
+  justify-content: center;
+  margin-bottom: 10px;
+  pointer-events: none;
+}
+
+.composer > .composer-orb-slot:empty {
+  display: none;
 }
 
 .hero-orb {
   position: relative;
-  width: 132px;
-  height: 132px;
-  margin-bottom: 26px;
+  /* Box, not sphere: the renderer insets the dots so the wave has room to
+     swell without clipping, so the visible orb is ~176px across. */
+  width: 224px;
+  height: 224px;
+  margin-bottom: 24px;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -356,16 +367,16 @@ body {
   height: 100%;
 }
 
-/* Docked state changes only the box size. The renderer reads that size back
+/* Floating state changes only the box size. The renderer reads that size back
    and picks its own dot count and detail level for it, rather than cramming
-   landing-density dots into 26px. */
-.hero-orb.orb-docked {
-  width: 26px;
-  height: 26px;
+   landing-density dots into a fraction of the area. */
+.hero-orb.orb-floating {
+  width: 64px;
+  height: 64px;
   margin-bottom: 0;
 }
 
-.hero-orb.orb-docked::before { inset: -40%; opacity: 0.4; }
+.hero-orb.orb-floating::before { inset: -34%; opacity: 0.45; }
 
 .hero-orb.orb-thinking::before { animation: orb-halo-soft 2.2s ease-in-out infinite; }
 .hero-orb.orb-speaking::before { animation: orb-halo-strong 0.9s ease-in-out infinite; }
@@ -428,76 +439,6 @@ body {
 .empty-state p {
   font-size: 15px;
   color: var(--text-tertiary);
-}
-
-.suggestion-grid {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 10px;
-  margin-top: 30px;
-  width: 100%;
-  max-width: 520px;
-}
-
-.suggestion-card {
-  display: flex;
-  align-items: flex-start;
-  gap: 10px;
-  padding: 13px 14px;
-  text-align: left;
-  background: var(--bg-secondary);
-  border: 1px solid var(--border-color);
-  border-radius: var(--radius-lg);
-  color: var(--text-secondary);
-  font-family: inherit;
-  cursor: pointer;
-  transition: border-color 0.15s ease, background 0.15s ease,
-              transform 0.12s ease, box-shadow 0.15s ease;
-}
-
-.suggestion-card:hover {
-  border-color: color-mix(in srgb, var(--grad-mid) 45%, var(--border-color));
-  background: var(--bg-hover);
-  transform: translateY(-2px);
-  box-shadow: 0 8px 20px -12px var(--orb-glow);
-}
-
-.suggestion-card:active { transform: translateY(0); }
-
-.suggestion-icon {
-  display: flex;
-  flex-shrink: 0;
-  color: var(--grad-mid);
-  margin-top: 1px;
-}
-
-.suggestion-text {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  min-width: 0;
-}
-
-.suggestion-title {
-  font-size: 13.5px;
-  font-weight: 600;
-  color: var(--text-primary);
-  letter-spacing: -0.01em;
-}
-
-.suggestion-sub {
-  font-size: 12px;
-  color: var(--text-tertiary);
-  line-height: 1.4;
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .suggestion-card { transition: none; }
-  .suggestion-card:hover { transform: none; }
-}
-
-@media (max-width: 560px) {
-  .suggestion-grid { grid-template-columns: minmax(0, 1fr); }
 }
 
 .message {
