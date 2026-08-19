@@ -130,6 +130,64 @@ def _generate_title_from_message(text):
     return text[:50].rsplit(" ", 1)[0] + "…"
 
 
+THINK_OPEN = "<think>"
+THINK_CLOSE = "</think>"
+
+
+def _partial_tag_len(text, tag):
+    """Length of the longest suffix of text that is a proper prefix of tag."""
+    for n in range(min(len(text), len(tag) - 1), 0, -1):
+        if text.endswith(tag[:n]):
+            return n
+    return 0
+
+
+def _strip_think_spans(deltas):
+    """
+    Filters <think>…</think> spans out of a stream of text deltas.
+
+    The reasoning_* parameters should already keep reasoning out of the response
+    body, but a thinking-mode model can still inline it as <think> tags, and a
+    tag can be split across two deltas ("<thi" + "nk>"). So any trailing text
+    that might be the start of a tag is held back until the next delta resolves
+    it, rather than being forwarded and then un-sendable.
+    """
+    buffer = ""
+    in_think = False
+
+    for delta in deltas:
+        buffer += delta
+        out = ""
+
+        while buffer:
+            if in_think:
+                idx = buffer.find(THINK_CLOSE)
+                if idx == -1:
+                    keep = _partial_tag_len(buffer, THINK_CLOSE)
+                    buffer = buffer[len(buffer) - keep:] if keep else ""
+                    break
+                buffer = buffer[idx + len(THINK_CLOSE):]
+                in_think = False
+            else:
+                idx = buffer.find(THINK_OPEN)
+                if idx == -1:
+                    keep = _partial_tag_len(buffer, THINK_OPEN)
+                    split = len(buffer) - keep
+                    out += buffer[:split]
+                    buffer = buffer[split:]
+                    break
+                out += buffer[:idx]
+                buffer = buffer[idx + len(THINK_OPEN):]
+                in_think = True
+
+        if out:
+            yield out
+
+    # Trailing text that looked like a partial tag but never became one.
+    if buffer and not in_think:
+        yield buffer
+
+
 def _stream_groq_response(conversation_id, messages_for_api, model):
     """
     SSE generator: calls Groq in streaming mode, yields each text chunk
@@ -140,18 +198,32 @@ def _stream_groq_response(conversation_id, messages_for_api, model):
         yield "data: [DONE]\n\n"
         return
 
+    # qwen/qwen3.6-27b ships a "thinking mode" that emits step-by-step reasoning
+    # before the final answer. reasoning_format="hidden" keeps that reasoning out
+    # of the response body; reasoning_effort="none" puts the model in
+    # non-thinking mode so it never generates the reasoning to begin with.
+    # reasoning_effort is only supported by qwen/qwen3.6-27b, so it is sent for
+    # that model alone — the default text model rejects the parameter.
+    reasoning_params = {"reasoning_format": "hidden"}
+    if model == VISION_MODEL_NAME:
+        reasoning_params["reasoning_effort"] = "none"
+
     full_response = ""
     try:
         stream = groq_client.chat.completions.create(
             model=model,
             messages=messages_for_api,
             stream=True,
+            **reasoning_params,
         )
-        for chunk in stream:
-            delta = chunk.choices[0].delta.content
-            if delta:
-                full_response += delta
-                yield f"data: {json.dumps({'delta': delta})}\n\n"
+        deltas = (
+            chunk.choices[0].delta.content
+            for chunk in stream
+            if chunk.choices[0].delta.content
+        )
+        for delta in _strip_think_spans(deltas):
+            full_response += delta
+            yield f"data: {json.dumps({'delta': delta})}\n\n"
     except Exception as e:
         yield f"data: {json.dumps({'error': str(e)})}\n\n"
         yield "data: [DONE]\n\n"
