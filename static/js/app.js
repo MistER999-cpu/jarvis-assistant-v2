@@ -59,16 +59,22 @@ const userMsgTpl = document.getElementById("userMessageTemplate");
 const assistantMsgTpl = document.getElementById("assistantMessageTemplate");
 const convItemTpl = document.getElementById("conversationItemTemplate");
 
-// Configure marked.js to use highlight.js for syntax highlighting
-marked.setOptions({
-  highlight: function (code, lang) {
-    if (lang && hljs.getLanguage(lang)) {
-      return hljs.highlight(code, { language: lang }).value;
-    }
-    return hljs.highlightAuto(code).value;
-  },
-  breaks: true,
-});
+// Configure marked.js to use highlight.js for syntax highlighting.
+// Guarded: marked/hljs load from a CDN via non-deferred <script> tags with no
+// error handling. If either fails to load (network blip, ad blocker,
+// offline dev), an unguarded call here throws at module scope and aborts
+// every listener registration later in this file — including drag-and-drop.
+if (typeof marked !== "undefined" && typeof hljs !== "undefined") {
+  marked.setOptions({
+    highlight: function (code, lang) {
+      if (lang && hljs.getLanguage(lang)) {
+        return hljs.highlight(code, { language: lang }).value;
+      }
+      return hljs.highlightAuto(code).value;
+    },
+    breaks: true,
+  });
+}
 
 // ---------------- Theme ----------------
 
