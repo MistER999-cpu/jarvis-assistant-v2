@@ -17,6 +17,16 @@ import database as db
 
 load_dotenv()
 
+# Shared vocabulary/wording for converting LaTeX and markdown into speech —
+# the single source of truth for both this file's _convert_math_for_speech /
+# _strip_markdown_for_speech (used by the Orpheus/Groq TTS path) and the
+# mirrored convertMathForSpeech / stripMarkdownForSpeech in static/js/app.js
+# (used by the browser-speechSynthesis fallback). Each side keeps its own
+# regex syntax — only the words/phrases live here. Injected into index.html
+# as window.SPEECH_RULES so the frontend never has to fetch it separately.
+with open(os.path.join(os.path.dirname(__file__), "speech_rules.json")) as _f:
+    SPEECH_RULES = json.load(_f)
+
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
 MODEL_NAME = "openai/gpt-oss-120b"
 VISION_MODEL_NAME = "qwen/qwen3.6-27b"  # only openai/gpt-oss-120b lacks image support; this one has it
@@ -108,7 +118,7 @@ def _build_api_messages(history):
 
 @app.route("/")
 def index():
-    return render_template("index.html")
+    return render_template("index.html", speech_rules=SPEECH_RULES)
 
 
 # ---------------------------------------------------------------------------
@@ -437,27 +447,30 @@ def _convert_math_for_speech(text):
     """
     Converts common LaTeX math notation into spoken words, so "x^2 + y^2 = r^2"
     is heard as "x squared plus y squared equals r squared" instead of literal
-    backslashes, carets, and braces. Mirrors the JS convertMathForSpeech used
-    for the browser-TTS path, so both voice backends sound consistent.
+    backslashes, carets, and braces. Vocabulary (Greek letter names, operator
+    phrases, fraction/root/power wording) comes from speech_rules.json, the
+    shared source of truth with the JS convertMathForSpeech used for the
+    browser-TTS path — only the regex patterns are duplicated, not the words.
     """
     import re
-    text = re.sub(r"\\frac\{([^{}]+)\}\{([^{}]+)\}", r"(\1) over (\2)", text)
-    text = re.sub(r"\\sqrt\{([^{}]+)\}", r"the square root of (\1)", text)
-    for cmd, word in [
-        ("alpha", "alpha"), ("beta", "beta"), ("gamma", "gamma"), ("delta", "delta"),
-        ("epsilon", "epsilon"), ("theta", "theta"), ("lambda", "lambda"), ("mu", "mu"),
-        ("pi", "pi"), ("sigma", "sigma"), ("omega", "omega"),
-    ]:
+    frac = SPEECH_RULES["fraction_wording"]
+    text = re.sub(
+        r"\\frac\{([^{}]+)\}\{([^{}]+)\}",
+        frac["prefix"] + r"\1" + frac["infix"] + r"\2" + frac["suffix"],
+        text,
+    )
+    sqrt = SPEECH_RULES["sqrt_wording"]
+    text = re.sub(r"\\sqrt\{([^{}]+)\}", sqrt["prefix"] + r"\1" + sqrt["suffix"], text)
+    for cmd, word in SPEECH_RULES["greek_letters"].items():
         text = text.replace(f"\\{cmd}", word)
-    text = text.replace("\\times", " times ").replace("\\cdot", " times ")
-    text = text.replace("\\div", " divided by ").replace("\\pm", " plus or minus ")
-    text = text.replace("\\leq", " less than or equal to ").replace("\\geq", " greater than or equal to ")
-    text = text.replace("\\neq", " not equal to ").replace("\\approx", " approximately equal to ")
-    text = text.replace("\\infty", "infinity")
-    text = re.sub(r"([A-Za-z0-9])\^2\b", r"\1 squared", text)
-    text = re.sub(r"([A-Za-z0-9])\^3\b", r"\1 cubed", text)
-    text = re.sub(r"([A-Za-z0-9])\^\{?([A-Za-z0-9]+)\}?", r"\1 to the \2", text)
-    text = re.sub(r"([A-Za-z0-9])_\{?([A-Za-z0-9]+)\}?", r"\1 sub \2", text)
+    for op in SPEECH_RULES["operators"]:
+        text = text.replace(op["latex"], op["spoken"])
+    power = SPEECH_RULES["power_wording"]
+    text = re.sub(r"([A-Za-z0-9])\^2\b", r"\1" + power["squared_suffix"], text)
+    text = re.sub(r"([A-Za-z0-9])\^3\b", r"\1" + power["cubed_suffix"], text)
+    text = re.sub(r"([A-Za-z0-9])\^\{?([A-Za-z0-9]+)\}?", r"\1" + power["nth_infix"] + r"\2", text)
+    sub = SPEECH_RULES["subscript_wording"]
+    text = re.sub(r"([A-Za-z0-9])_\{?([A-Za-z0-9]+)\}?", r"\1" + sub["infix"] + r"\2", text)
     text = re.sub(r"\$\$([\s\S]*?)\$\$", r"\1", text)
     text = re.sub(r"\$([^$]+)\$", r"\1", text)
     text = re.sub(r"\\\[([\s\S]*?)\\\]", r"\1", text)
@@ -474,10 +487,15 @@ def _strip_markdown_for_speech(text):
     Math is converted to words first (see _convert_math_for_speech) so
     meaning survives, not just formatting. Not exhaustive — good enough for
     normal chat replies.
+
+    Must strip exactly the constructs listed in
+    speech_rules.json's markdown_constructs_stripped, in the same set as the
+    JS stripMarkdownForSpeech (browser-TTS path) — update both if a construct
+    is added or removed.
     """
     import re
     text = _convert_math_for_speech(text)
-    text = re.sub(r"```.*?```", " code block omitted ", text, flags=re.DOTALL)  # fenced code
+    text = re.sub(r"```.*?```", SPEECH_RULES["markdown_wording"]["code_block"], text, flags=re.DOTALL)  # fenced code
     text = re.sub(r"`([^`]+)`", r"\1", text)                                     # inline code
     text = re.sub(r"!\[[^\]]*\]\([^)]+\)", "", text)                             # images
     text = re.sub(r"\[([^\]]+)\]\([^)]+\)", r"\1", text)                         # links -> keep label
@@ -485,6 +503,8 @@ def _strip_markdown_for_speech(text):
     text = re.sub(r"(\*\*|__)(.*?)\1", r"\2", text)                              # bold
     text = re.sub(r"(\*|_)(.*?)\1", r"\2", text)                                 # italics
     text = re.sub(r"^\s*[-*+]\s+", "", text, flags=re.MULTILINE)                 # bullet markers
+    text = re.sub(r"^\s*\|.*\|\s*$", "", text, flags=re.MULTILINE)               # table rows (unreadable spoken; skip)
+    text = re.sub(r"^\s*-{3,}\s*$", "", text, flags=re.MULTILINE)                # horizontal rules
     text = re.sub(r"\n{2,}", ". ", text)                                         # paragraph breaks -> pause
     text = re.sub(r"\s+", " ", text).strip()
     return text

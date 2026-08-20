@@ -146,6 +146,13 @@
 <script src="https://cdnjs.cloudflare.com/ajax/libs/marked/9.1.6/marked.min.js"></script>
 <script defer src="https://cdn.jsdelivr.net/npm/katex@0.18.4/dist/katex.min.js" integrity="sha384-ykMNcWQhhTUb0YV9SPpPUFURHZ+tWmubkakGBP+OgNK/UXdO2gtzglWx0Rj9hnO3" crossorigin="anonymous"></script>
 <script defer src="https://cdn.jsdelivr.net/npm/katex@0.18.4/dist/contrib/auto-render.min.js" integrity="sha384-bjyGPfbij8/NDKJhSGZNP/khQVgtHUE5exjm4Ydllo42FwIgYsdLO2lXGmRBf5Mz" crossorigin="anonymous"></script>
+<script>
+  // Shared LaTeX/markdown speech vocabulary — single source of truth also
+  // used server-side by _convert_math_for_speech / _strip_markdown_for_speech
+  // in app.py (see speech_rules.json). Inlined here, not fetched, so the
+  // offline browser-TTS fallback never waits on a network round-trip for it.
+  window.SPEECH_RULES = {{ speech_rules | tojson }};
+</script>
 <script defer src="{{ url_for('static', filename='js/app.js') }}"></script>
 </body>
 </html>

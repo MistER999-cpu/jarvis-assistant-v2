@@ -1,0 +1,27 @@
+{
+  "greek_letters": {
+    "alpha": "alpha", "beta": "beta", "gamma": "gamma", "delta": "delta",
+    "epsilon": "epsilon", "theta": "theta", "lambda": "lambda", "mu": "mu",
+    "pi": "pi", "sigma": "sigma", "omega": "omega"
+  },
+  "operators": [
+    {"latex": "\\times", "spoken": " times "},
+    {"latex": "\\cdot", "spoken": " times "},
+    {"latex": "\\div", "spoken": " divided by "},
+    {"latex": "\\pm", "spoken": " plus or minus "},
+    {"latex": "\\leq", "spoken": " less than or equal to "},
+    {"latex": "\\geq", "spoken": " greater than or equal to "},
+    {"latex": "\\neq", "spoken": " not equal to "},
+    {"latex": "\\approx", "spoken": " approximately equal to "},
+    {"latex": "\\infty", "spoken": "infinity"}
+  ],
+  "fraction_wording": {"prefix": "(", "infix": ") over (", "suffix": ")"},
+  "sqrt_wording": {"prefix": "the square root of (", "suffix": ")"},
+  "power_wording": {"squared_suffix": " squared", "cubed_suffix": " cubed", "nth_infix": " to the "},
+  "subscript_wording": {"infix": " sub "},
+  "markdown_wording": {"code_block": " code block omitted "},
+  "markdown_constructs_stripped": [
+    "fenced_code", "inline_code", "images", "links", "headers",
+    "bold", "italics", "bullets", "tables", "horizontal_rules", "blank_lines"
+  ]
+}

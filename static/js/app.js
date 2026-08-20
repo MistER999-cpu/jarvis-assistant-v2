@@ -1817,40 +1817,48 @@ async function pickBestVoice() {
  * roots, Greek letters, basic operators). Runs before markdown stripping,
  * since $...$ math delimiters would otherwise just get deleted as stray
  * symbols and the meaning would be lost, not just the formatting.
+ *
+ * Vocabulary (Greek letter names, operator phrases, fraction/root/power
+ * wording) comes from window.SPEECH_RULES, inlined from speech_rules.json —
+ * the shared source of truth with the Python _convert_math_for_speech used
+ * for the Orpheus/Groq TTS path. Only the regex patterns are duplicated here,
+ * not the words.
  */
 function convertMathForSpeech(text) {
-  return text
-    // Fractions: \frac{a}{b} -> "a over b"
-    .replace(/\\frac\{([^{}]+)\}\{([^{}]+)\}/g, "($1) over ($2)")
-    // Square roots: \sqrt{x} -> "the square root of x"
-    .replace(/\\sqrt\{([^{}]+)\}/g, "the square root of ($1)")
-    // Greek letters commonly seen in math/physics answers
-    .replace(/\\alpha/g, "alpha").replace(/\\beta/g, "beta")
-    .replace(/\\gamma/g, "gamma").replace(/\\delta/g, "delta")
-    .replace(/\\epsilon/g, "epsilon").replace(/\\theta/g, "theta")
-    .replace(/\\lambda/g, "lambda").replace(/\\mu/g, "mu")
-    .replace(/\\pi/g, "pi").replace(/\\sigma/g, "sigma")
-    .replace(/\\omega/g, "omega")
-    // Operators and relations
-    .replace(/\\times/g, " times ").replace(/\\cdot/g, " times ")
-    .replace(/\\div/g, " divided by ").replace(/\\pm/g, " plus or minus ")
-    .replace(/\\leq/g, " less than or equal to ").replace(/\\geq/g, " greater than or equal to ")
-    .replace(/\\neq/g, " not equal to ").replace(/\\approx/g, " approximately equal to ")
-    .replace(/\\infty/g, "infinity")
-    // Exponents and subscripts: x^2 -> "x squared", x^3 -> "x cubed", x^n -> "x to the n"
-    .replace(/([A-Za-z0-9])\^2\b/g, "$1 squared")
-    .replace(/([A-Za-z0-9])\^3\b/g, "$1 cubed")
-    .replace(/([A-Za-z0-9])\^\{?([A-Za-z0-9]+)\}?/g, "$1 to the $2")
-    .replace(/([A-Za-z0-9])_\{?([A-Za-z0-9]+)\}?/g, "$1 sub $2")
-    // Strip remaining math delimiters and leftover LaTeX commands/braces —
-    // whatever wasn't converted above is better read as plain words than
-    // left as literal backslashes and braces.
-    .replace(/\$\$([\s\S]*?)\$\$/g, "$1")
-    .replace(/\$([^$]+)\$/g, "$1")
-    .replace(/\\\[([\s\S]*?)\\\]/g, "$1")
-    .replace(/\\\(([\s\S]*?)\\\)/g, "$1")
-    .replace(/\\[a-zA-Z]+/g, "")
-    .replace(/[{}]/g, "");
+  const rules = window.SPEECH_RULES;
+
+  const frac = rules.fraction_wording;
+  text = text.replace(/\\frac\{([^{}]+)\}\{([^{}]+)\}/g, frac.prefix + "$1" + frac.infix + "$2" + frac.suffix);
+
+  const sqrt = rules.sqrt_wording;
+  text = text.replace(/\\sqrt\{([^{}]+)\}/g, sqrt.prefix + "$1" + sqrt.suffix);
+
+  for (const [cmd, word] of Object.entries(rules.greek_letters)) {
+    text = text.replaceAll(`\\${cmd}`, word);
+  }
+  for (const op of rules.operators) {
+    text = text.replaceAll(op.latex, op.spoken);
+  }
+
+  // Exponents and subscripts: x^2 -> "x squared", x^3 -> "x cubed", x^n -> "x to the n"
+  const power = rules.power_wording;
+  text = text.replace(/([A-Za-z0-9])\^2\b/g, "$1" + power.squared_suffix);
+  text = text.replace(/([A-Za-z0-9])\^3\b/g, "$1" + power.cubed_suffix);
+  text = text.replace(/([A-Za-z0-9])\^\{?([A-Za-z0-9]+)\}?/g, "$1" + power.nth_infix + "$2");
+
+  const sub = rules.subscript_wording;
+  text = text.replace(/([A-Za-z0-9])_\{?([A-Za-z0-9]+)\}?/g, "$1" + sub.infix + "$2");
+
+  // Strip remaining math delimiters and leftover LaTeX commands/braces —
+  // whatever wasn't converted above is better read as plain words than
+  // left as literal backslashes and braces.
+  text = text.replace(/\$\$([\s\S]*?)\$\$/g, "$1");
+  text = text.replace(/\$([^$]+)\$/g, "$1");
+  text = text.replace(/\\\[([\s\S]*?)\\\]/g, "$1");
+  text = text.replace(/\\\(([\s\S]*?)\\\)/g, "$1");
+  text = text.replace(/\\[a-zA-Z]+/g, "");
+  text = text.replace(/[{}]/g, "");
+  return text;
 }
 
 /**
@@ -1859,10 +1867,16 @@ function convertMathForSpeech(text) {
  * Mirrors the server-side stripper used for the Orpheus TTS path, so both
  * voice backends sound equally clean. Math is converted to words first
  * (see convertMathForSpeech) so meaning survives, not just formatting.
+ *
+ * Must strip exactly the constructs listed in
+ * SPEECH_RULES.markdown_constructs_stripped, in the same set as the Python
+ * _strip_markdown_for_speech (Orpheus TTS path) — update both if a construct
+ * is added or removed.
  */
 function stripMarkdownForSpeech(text) {
+  const codeBlockWording = window.SPEECH_RULES.markdown_wording.code_block;
   return convertMathForSpeech(text)
-    .replace(/```[\s\S]*?```/g, " code block omitted ") // fenced code
+    .replace(/```[\s\S]*?```/g, codeBlockWording)          // fenced code
     .replace(/`([^`]+)`/g, "$1")                          // inline code
     .replace(/!\[[^\]]*\]\([^)]+\)/g, "")                  // images
     .replace(/\[([^\]]+)\]\([^)]+\)/g, "$1")               // links -> keep label
