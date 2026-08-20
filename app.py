@@ -221,6 +221,13 @@ def _strip_think_spans(deltas):
         yield buffer
 
 
+# Conversation ID -> in-flight Groq stream. Lets the /stop endpoint close the
+# upstream connection when the user cancels a reply, instead of leaving Groq
+# to keep generating (and billing) tokens nobody reads. Only one reply streams
+# per conversation at a time, so a plain dict is enough.
+_active_streams = {}
+
+
 def _stream_groq_response(conversation_id, messages_for_api, model):
     """
     SSE generator: calls Groq in streaming mode, yields each text chunk
@@ -242,6 +249,7 @@ def _stream_groq_response(conversation_id, messages_for_api, model):
         reasoning_params["reasoning_effort"] = "none"
 
     full_response = ""
+    stream = None
     try:
         stream = groq_client.chat.completions.create(
             model=model,
@@ -249,6 +257,7 @@ def _stream_groq_response(conversation_id, messages_for_api, model):
             stream=True,
             **reasoning_params,
         )
+        _active_streams[conversation_id] = stream
         deltas = (
             chunk.choices[0].delta.content
             for chunk in stream
@@ -261,6 +270,14 @@ def _stream_groq_response(conversation_id, messages_for_api, model):
         yield f"data: {json.dumps({'error': str(e)})}\n\n"
         yield "data: [DONE]\n\n"
         return
+    finally:
+        # Runs on every exit path — normal completion, an exception above, or
+        # the client disconnecting (GeneratorExit) — so the Groq connection
+        # never leaks. Also covers the /stop endpoint calling stream.close()
+        # directly: Stream.close() is safe to call more than once.
+        _active_streams.pop(conversation_id, None)
+        if stream is not None:
+            stream.close()
 
     # Save the full response once the stream is done
     if full_response.strip():
@@ -332,6 +349,15 @@ def api_send_message(conv_id):
         mimetype="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
+
+
+@app.route("/api/conversations/<int:conv_id>/stop", methods=["POST"])
+def api_stop_message(conv_id):
+    """Closes the in-flight Groq stream for this conversation, if any."""
+    stream = _active_streams.get(conv_id)
+    if stream is not None:
+        stream.close()
+    return jsonify({"stopped": stream is not None})
 
 
 @app.route("/api/conversations/<int:conv_id>/regenerate", methods=["POST"])
@@ -590,4 +616,11 @@ if __name__ == "__main__":
         print("\n⚠️  GROQ_API_KEY not found. Create a .env file (see .env.example) before sending messages.\n")
     # NEVER set debug=True if this app is ever reachable from outside localhost —
     # it exposes a remote code execution console on error pages.
-    app.run(debug=True, port=5000)
+    # threaded=True: Werkzeug defaults to handling one request at a time, which
+    # would leave the /stop endpoint queued behind an in-flight SSE stream and
+    # unable to reach the server until the reply finished on its own.
+    # NEVER set threaded=True alongside debug=True if this app is ever reachable
+    # from outside localhost — combined with the debug console's remote code
+    # execution exposure, threading lets an attacker exploit it while other
+    # requests keep being served instead of the whole server being blocked.
+    app.run(debug=True, port=5000, threaded=True)

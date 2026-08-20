@@ -1713,6 +1713,13 @@ els.stopBtn.addEventListener("click", () => {
   if (state.abortController) {
     state.abortController.abort();
   }
+  // Aborting the fetch only stops the browser from reading the response; it
+  // doesn't tell the server to stop pulling from Groq. Tell it explicitly so
+  // it closes the upstream connection instead of generating (and paying for)
+  // tokens nobody will see.
+  if (state.currentConversationId) {
+    fetch(`/api/conversations/${state.currentConversationId}/stop`, { method: "POST" }).catch(() => {});
+  }
 });
 
 // ---------------- Voice: text-to-speech (TTS) ----------------
