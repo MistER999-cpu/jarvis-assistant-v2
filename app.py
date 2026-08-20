@@ -307,20 +307,37 @@ def _stream_groq_response(conversation_id, messages_for_api, model):
 
     full_response = ""
     stream = None
+    usage = None
     try:
         stream = groq_client.chat.completions.create(
             model=model,
             messages=messages_for_api,
             stream=True,
+            # Asks Groq to include a token-usage block on the final chunk, so
+            # usage can be tracked locally with real numbers instead of an
+            # estimate. Not a typed SDK parameter (yet) — goes through
+            # extra_body. Confirmed working against the real API: the final
+            # chunk's `usage` field comes back populated.
+            extra_body={"stream_options": {"include_usage": True}},
             **reasoning_params,
         )
         _active_streams[conversation_id] = stream
-        deltas = (
-            chunk.choices[0].delta.content
-            for chunk in stream
-            if chunk.choices[0].delta.content
-        )
-        for delta in _strip_think_spans(deltas):
+
+        def _content_deltas():
+            # The usage-carrying final chunk has an empty choices list (per
+            # stream_options.include_usage semantics), so chunk.choices[0]
+            # would raise on it — guard with `chunk.choices` first. Captures
+            # usage into the enclosing scope as a side effect since this is
+            # the only pass over every chunk; a second pass isn't possible,
+            # the stream can't be replayed.
+            nonlocal usage
+            for chunk in stream:
+                if chunk.usage is not None:
+                    usage = chunk.usage
+                if chunk.choices and chunk.choices[0].delta.content:
+                    yield chunk.choices[0].delta.content
+
+        for delta in _strip_think_spans(_content_deltas()):
             full_response += delta
             yield f"data: {json.dumps({'delta': delta})}\n\n"
     except Exception as e:
@@ -339,6 +356,19 @@ def _stream_groq_response(conversation_id, messages_for_api, model):
     # Save the full response once the stream is done
     if full_response.strip():
         db.add_message(conversation_id, "assistant", full_response)
+
+    # usage is only set if the stream ran to natural completion (the
+    # usage-carrying chunk is the last one) — a Stop-cancelled or errored
+    # call never reaches it, so nothing gets logged for those, which is
+    # correct: there's no real Groq-reported number to record for them.
+    if usage is not None:
+        db.log_api_usage(
+            kind="vision" if model == VISION_MODEL_NAME else "chat",
+            model=model,
+            prompt_tokens=usage.prompt_tokens,
+            completion_tokens=usage.completion_tokens,
+            total_tokens=usage.total_tokens,
+        )
 
     yield "data: [DONE]\n\n"
 
@@ -480,12 +510,17 @@ def api_transcribe():
     if audio_file is None:
         return jsonify({"error": "No audio file received"}), 400
 
+    audio_bytes = audio_file.read()
     try:
         transcription = groq_client.audio.transcriptions.create(
-            file=(audio_file.filename or "recording.webm", audio_file.read()),
+            file=(audio_file.filename or "recording.webm", audio_bytes),
             model=STT_MODEL_NAME,
             response_format="json",
         )
+        # Whisper's response carries no usage/duration data at all (confirmed
+        # from the SDK's Transcription type: just `text`), so the size of
+        # what we actually sent is the only honest number available here.
+        db.log_api_usage(kind="transcription", model=STT_MODEL_NAME, input_bytes=len(audio_bytes))
         return jsonify({"text": transcription.text.strip()})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
@@ -618,6 +653,11 @@ def _synthesize_speech_wav_bytes(text):
         input=text,
         response_format="wav",
     )
+    # Speech responses are raw audio bytes with no JSON wrapper, so there's no
+    # usage field of any kind to read — the length of the text we sent it is
+    # the only honest number available. Logged one row per chunk (this
+    # function runs once per chunk), matching how Groq actually bills it.
+    db.log_api_usage(kind="tts", model=TTS_MODEL_NAME, input_chars=len(text))
     # NOTE: client.audio.speech.create() returns a BinaryAPIResponse object.
     # Different groq-python versions have exposed the raw bytes differently
     # (.content, .read(), etc.) and this has changed across releases, so the
@@ -677,6 +717,43 @@ def api_speak():
         print(f"[TTS ERROR] {type(e).__name__}: {e}")
         traceback.print_exc()
         return jsonify({"error": str(e)}), 500
+
+
+# ---------------------------------------------------------------------------
+# API — Usage tracking
+# ---------------------------------------------------------------------------
+
+@app.route("/api/usage/today", methods=["GET"])
+def api_usage_today():
+    """
+    Today's (local calendar day) usage, broken down by unit — chat/vision
+    tokens are a real, comparable number; transcription and TTS aren't
+    token-based at all (see database.get_usage_today docstring), so they're
+    reported separately as request counts + input size rather than folded
+    into a fake combined total.
+    """
+    usage = db.get_usage_today()
+    by_kind = usage["by_kind"]
+
+    def _get(kind, field, default=0):
+        return by_kind.get(kind, {}).get(field, default)
+
+    return jsonify({
+        "date": usage["date"],
+        "chat_vision": {
+            "prompt_tokens": _get("chat", "prompt_tokens") + _get("vision", "prompt_tokens"),
+            "completion_tokens": _get("chat", "completion_tokens") + _get("vision", "completion_tokens"),
+            "total_tokens": _get("chat", "total_tokens") + _get("vision", "total_tokens"),
+        },
+        "transcription": {
+            "requests": _get("transcription", "requests"),
+            "input_bytes": _get("transcription", "input_bytes"),
+        },
+        "tts": {
+            "requests": _get("tts", "requests"),
+            "input_chars": _get("tts", "input_chars"),
+        },
+    })
 
 
 if __name__ == "__main__":

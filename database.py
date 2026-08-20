@@ -72,6 +72,21 @@ def init_db():
         if "image_path" not in existing_columns:
             conn.execute("ALTER TABLE messages ADD COLUMN image_path TEXT")
 
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS api_usage (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                created_at TEXT NOT NULL,
+                kind TEXT NOT NULL CHECK(kind IN ('chat', 'vision', 'transcription', 'tts')),
+                model TEXT,
+                prompt_tokens INTEGER,
+                completion_tokens INTEGER,
+                total_tokens INTEGER,
+                input_bytes INTEGER,
+                input_chars INTEGER
+            )
+        """)
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_api_usage_created_at ON api_usage(created_at)")
+
         conn.commit()
 
 
@@ -258,3 +273,47 @@ def delete_last_assistant_message(conversation_id):
     if row:
         _delete_image_file(row["image_path"])
     return row["id"] if row else None
+
+
+# ---------- Usage tracking ----------
+
+def log_api_usage(kind, model=None, prompt_tokens=None, completion_tokens=None,
+                   total_tokens=None, input_bytes=None, input_chars=None):
+    """
+    Records one real Groq API call for local usage tracking — never an
+    estimate, only called with numbers Groq itself returned (token counts
+    from a completed stream's usage field, or byte/char counts of what was
+    actually sent). Uses local time, unlike _now() (UTC, used everywhere
+    else): this is a single-user app running on the user's own machine, so
+    "today" here should match the user's actual calendar day.
+    """
+    with get_connection() as conn:
+        conn.execute(
+            "INSERT INTO api_usage (created_at, kind, model, prompt_tokens, completion_tokens, "
+            "total_tokens, input_bytes, input_chars) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (datetime.now().isoformat(), kind, model, prompt_tokens, completion_tokens,
+             total_tokens, input_bytes, input_chars)
+        )
+        conn.commit()
+
+
+def get_usage_today():
+    """
+    Returns today's (local calendar day) usage, broken down by kind — never
+    blended into one number, since chat/vision tokens and
+    transcription/tts request+size counts aren't the same unit.
+    """
+    today = datetime.now().strftime("%Y-%m-%d")
+    with get_connection() as conn:
+        rows = conn.execute(
+            "SELECT kind, "
+            "COUNT(*) AS requests, "
+            "COALESCE(SUM(prompt_tokens), 0) AS prompt_tokens, "
+            "COALESCE(SUM(completion_tokens), 0) AS completion_tokens, "
+            "COALESCE(SUM(total_tokens), 0) AS total_tokens, "
+            "COALESCE(SUM(input_bytes), 0) AS input_bytes, "
+            "COALESCE(SUM(input_chars), 0) AS input_chars "
+            "FROM api_usage WHERE date(created_at) = ? GROUP BY kind",
+            (today,)
+        ).fetchall()
+    return {"date": today, "by_kind": {row["kind"]: dict(row) for row in rows}}

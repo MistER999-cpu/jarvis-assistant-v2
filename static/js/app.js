@@ -50,6 +50,12 @@ const els = {
   sunIcon: document.getElementById("sunIcon"),
   moonIcon: document.getElementById("moonIcon"),
   themeLabel: document.getElementById("themeLabel"),
+  usageToggle: document.getElementById("usageToggle"),
+  usageSummary: document.getElementById("usageSummary"),
+  usageBreakdown: document.getElementById("usageBreakdown"),
+  usageChatDetail: document.getElementById("usageChatDetail"),
+  usageTranscriptionDetail: document.getElementById("usageTranscriptionDetail"),
+  usageTtsDetail: document.getElementById("usageTtsDetail"),
 };
 
 const userMsgTpl = document.getElementById("userMessageTemplate");
@@ -107,6 +113,50 @@ function applyTheme(theme) {
 els.themeToggle.addEventListener("click", () => {
   const current = document.documentElement.getAttribute("data-theme");
   applyTheme(current === "dark" ? "light" : "dark");
+});
+
+// ---------------- Usage tracking ----------------
+
+function formatBytes(bytes) {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+/**
+ * Re-fetches today's local usage totals and updates the sidebar indicator.
+ * Called right after each action that could change the numbers (a reply
+ * finishes streaming, a transcription completes, a TTS call returns) rather
+ * than on a timer — there's no reason to poll when every state change is
+ * already a specific, known moment in the code. Fails silently: like TTS,
+ * this is a bonus readout, never something that should surface an error to
+ * the user or interrupt the actual conversation.
+ */
+async function refreshUsage() {
+  try {
+    const res = await fetch("/api/usage/today");
+    if (!res.ok) return;
+    const usage = await res.json();
+
+    const tokens = usage.chat_vision.total_tokens;
+    els.usageSummary.textContent = `Today: ${tokens.toLocaleString()} tokens`;
+    els.usageChatDetail.textContent =
+      `${tokens.toLocaleString()} (${usage.chat_vision.prompt_tokens.toLocaleString()} prompt · ` +
+      `${usage.chat_vision.completion_tokens.toLocaleString()} completion)`;
+    els.usageTranscriptionDetail.textContent =
+      `${usage.transcription.requests} req · ${formatBytes(usage.transcription.input_bytes)}`;
+    els.usageTtsDetail.textContent =
+      `${usage.tts.requests} req · ${usage.tts.input_chars.toLocaleString()} chars`;
+  } catch (err) {
+    // Silent failure, same rationale as speakText(): a usage readout is not
+    // worth surfacing an error over.
+  }
+}
+
+els.usageToggle.addEventListener("click", () => {
+  const expanded = els.usageToggle.getAttribute("aria-expanded") === "true";
+  els.usageToggle.setAttribute("aria-expanded", String(!expanded));
+  els.usageBreakdown.hidden = expanded;
 });
 
 // ---------------- Sidebar toggle ----------------
@@ -704,6 +754,7 @@ async function streamFromEndpoint(url, body) {
   textEl.classList.remove("streaming-cursor");
   setStreamingState(false);
   state.abortController = null;
+  refreshUsage();
 
   // The reply was rendered empty and streamed in, so this is the first point
   // at which its full text is known to read-aloud.
@@ -2059,6 +2110,7 @@ async function speakText(text) {
     if (!res.ok) return;
 
     const data = await res.json();
+    refreshUsage();
     if (!data.clips || data.clips.length === 0) return;
 
     await playAudioQueue(data.clips);
@@ -2202,6 +2254,7 @@ async function handleRecordingStop() {
   try {
     const res = await fetch("/api/transcribe", { method: "POST", body: formData });
     const data = await res.json();
+    refreshUsage();
 
     if (data.error) {
       setComposerHint(`Transcription error: ${data.error}`);
@@ -2251,4 +2304,5 @@ els.micBtn.addEventListener("touchend", (e) => {
   initTheme();
   await loadConversations();
   showEmptyState();
+  refreshUsage();
 })();
