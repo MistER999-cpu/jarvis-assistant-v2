@@ -9,7 +9,9 @@ Then open http://127.0.0.1:5000 in your browser.
 
 import os
 import json
-from flask import Flask, render_template, request, jsonify, Response, stream_with_context
+import base64
+import mimetypes
+from flask import Flask, render_template, request, jsonify, Response, stream_with_context, send_from_directory
 from dotenv import load_dotenv
 from groq import Groq
 
@@ -85,6 +87,29 @@ db.init_db()
 groq_client = Groq(api_key=GROQ_API_KEY) if GROQ_API_KEY else None
 
 
+def _image_data_url_for_message(m):
+    """
+    Returns a "data:image/...;base64,..." URL for Groq's vision API — the
+    only format it accepts here, since this app only runs on localhost and
+    can't hand Groq's servers a URL they could fetch themselves. Reads the
+    image off disk via image_path (current storage); falls back to the
+    image_data column for rows not yet migrated by migrate_images_to_files.py.
+    Returns None if the file is missing (e.g. deleted by hand outside the
+    app) so the caller can drop the image and keep the text going.
+    """
+    image_path = m.get("image_path")
+    if image_path:
+        full_path = os.path.join(db.IMAGES_DIR, image_path)
+        try:
+            with open(full_path, "rb") as f:
+                raw = f.read()
+        except OSError:
+            return None
+        mime = mimetypes.guess_type(full_path)[0] or "application/octet-stream"
+        return f"data:{mime};base64,{base64.b64encode(raw).decode('ascii')}"
+    return m.get("image_data")
+
+
 def _build_api_messages(history):
     """
     Prepends the system prompt to the conversation history for a Groq API call.
@@ -96,20 +121,36 @@ def _build_api_messages(history):
     vision request, and openai/gpt-oss-120b (the default model) has no image
     support at all, so the whole call must switch models together.
     """
-    has_image = any(m.get("image_data") for m in history)
+    has_image = any(m.get("image_data") or m.get("image_path") for m in history)
     model = VISION_MODEL_NAME if has_image else MODEL_NAME
 
     messages = [{"role": "system", "content": SYSTEM_PROMPT}]
     for m in history:
         if has_image:
             parts = [{"type": "text", "text": m["content"]}]
-            if m.get("image_data"):
-                parts.append({"type": "image_url", "image_url": {"url": m["image_data"]}})
+            image_url = _image_data_url_for_message(m)
+            if image_url:
+                parts.append({"type": "image_url", "image_url": {"url": image_url}})
             messages.append({"role": m["role"], "content": parts})
         else:
             messages.append({"role": m["role"], "content": m["content"]})
 
     return messages, model
+
+
+def _message_for_api(m):
+    """
+    Shapes a stored message row for the frontend's JSON response. The wire
+    field stays "image_data" either way — an <img src> works the same
+    whether it's a data: URL or an ordinary path — so the frontend needed no
+    changes: it now gets a URL under /api/images/ when image_path is set
+    (current storage), or the raw legacy base64 for rows not yet migrated.
+    """
+    out = dict(m)
+    if out.get("image_path"):
+        out["image_data"] = f"/api/images/{out['image_path']}"
+    out.pop("image_path", None)
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -141,8 +182,14 @@ def api_get_conversation(conv_id):
     conv = db.get_conversation(conv_id)
     if not conv:
         return jsonify({"error": "Conversation not found"}), 404
-    conv["messages"] = db.get_messages(conv_id)
+    conv["messages"] = [_message_for_api(m) for m in db.get_messages(conv_id)]
     return jsonify(conv)
+
+
+@app.route("/api/images/<path:rel_path>")
+def api_get_image(rel_path):
+    """Serves a stored image by its path relative to IMAGES_DIR (as stuffed into image_path)."""
+    return send_from_directory(db.IMAGES_DIR, rel_path)
 
 
 @app.route("/api/conversations/<int:conv_id>", methods=["PATCH"])
@@ -297,8 +344,9 @@ def _stream_groq_response(conversation_id, messages_for_api, model):
 
 
 # Groq's vision endpoint caps request images at 20MB; we cap well under that
-# (5MB raw before base64 overhead) to keep the local SQLite file reasonable,
-# since every image is stored inline as a base64 string per message.
+# (5MB raw before base64 overhead) to keep individual uploads reasonable —
+# images are stored as files under database.IMAGES_DIR, not in SQLite, but a
+# per-image cap is still worth keeping regardless of where bytes end up.
 MAX_IMAGE_BYTES = 5 * 1024 * 1024
 
 
