@@ -588,4 +588,6 @@ def api_speak():
 if __name__ == "__main__":
     if not GROQ_API_KEY:
         print("\n⚠️  GROQ_API_KEY not found. Create a .env file (see .env.example) before sending messages.\n")
+    # NEVER set debug=True if this app is ever reachable from outside localhost —
+    # it exposes a remote code execution console on error pages.
     app.run(debug=True, port=5000)
