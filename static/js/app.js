@@ -708,9 +708,20 @@ async function streamFromEndpoint(url, body) {
   // at which its full text is known to read-aloud.
   messageSpeechText.set(assistantEl, fullText);
 
-  // Replies are no longer spoken automatically: the per-message read-aloud
-  // button is the way in, matching how the rest of the action row works. The
-  // global mute toggle that used to gate this went away with it.
+  // Auto-speak the reply through its own message's speaker icon — no separate
+  // mute button or global "muted" flag exists any more; the per-message icon
+  // is the only control, for both starting and stopping. Routing through
+  // toggleSpeakMessage() rather than calling speakText() directly means this
+  // takes the exact same start path a manual click would: it stops whatever
+  // else was playing first (including a still-running auto-speak from a
+  // moment ago), flips the icon to its speaking/stop state, and a click on it
+  // stops this playback the same way it stops a manually started one.
+  if (!wasAborted && fullText.trim()) {
+    const speakBtn = assistantEl.querySelector(".speak-btn");
+    if (speakBtn) {
+      toggleSpeakMessage(speakBtn, () => messageSpeechText.get(assistantEl) || "");
+    }
+  }
 
   // Refresh the sidebar (auto-generated title / recency order).
   // If the request was aborted, the server may not have finished writing to
@@ -1750,14 +1761,19 @@ function getAvailableVoices() {
  * Logs the full voice list once so you can see what's actually installed
  * and hand-pick a favorite by name if you want (see JARVIS_VOICE_NAME below).
  */
-let cachedVoice = null;
+// undefined = not looked up yet; null = looked up, no voice was available.
+// Both are falsy, so a truthy check here would treat "found nothing" the same
+// as "haven't checked", and redo the full ~1000ms lookup in getAvailableVoices()
+// on every single call for as long as no voice is available — which is forever
+// on a machine with no system TTS voices installed.
+let cachedVoice;
 
 // To force a specific voice, set its exact name here (see console log for
 // the full list on your machine), e.g. "Microsoft Ana Online (Natural) - English (United States)".
 const JARVIS_VOICE_NAME = null;
 
 async function pickBestVoice() {
-  if (cachedVoice) return cachedVoice;
+  if (cachedVoice !== undefined) return cachedVoice;
 
   const voices = await getAvailableVoices();
   console.log("Available speech voices:", voices.map((v) => v.name));
