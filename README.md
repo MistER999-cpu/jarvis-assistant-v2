@@ -72,12 +72,14 @@ F:\Jarvis\
 - ✅ Régénération de la dernière réponse
 - ✅ Mode clair / sombre (persisté dans le navigateur)
 - ✅ Timestamps sur chaque message
+- ✅ Réponses lues à voix haute via Orpheus (Groq TTS, voix `austin`) — la synthèse vocale du navigateur reste câblée comme repli si Orpheus/Groq est indisponible, mais n'est plus la voix active
+- ✅ Pièces jointes image (glisser-déposer ou bouton trombone, 5 Mo max) — bascule automatiquement sur `qwen/qwen3.6-27b` pour les gérer, ce modèle ayant la vision
 
 ## Limitations connues (normales pour la V1)
 
 - Le bouton "Stop" arrête l'affichage côté navigateur mais Groq continue de générer en arrière-plan côté serveur (l'arrêt réseau propre viendra si besoin — actuellement non prioritaire vu la vitesse de Groq).
-- Un seul modèle fixe : `llama-3.3-70b-versatile`. Le sélecteur de modèle est prévu pour plus tard.
-- Pas de pièces jointes (images/fichiers) — Phase ultérieure.
+- Un seul modèle fixe pour le texte : `openai/gpt-oss-120b`. Le sélecteur de modèle est prévu pour plus tard.
+- Pièces jointes limitées aux images — pas de fichiers (PDF, docs, etc.) pour l'instant.
 - Pas de mémoire entre conversations — c'est précisément l'objet de la Phase 2.
 
 ## Prochaine étape

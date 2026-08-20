@@ -2,10 +2,11 @@
    Jarvis — Frontend logic (Phase 1)
    ========================================================================== */
 
-// Set to true to use the browser's built-in speech synthesis (free, offline,
-// no rate limits, more robotic) instead of Groq's Orpheus TTS (higher quality,
-// costs API quota). Handy for testing without burning the daily TTS budget —
-// flip back to false once you're done iterating.
+// Orpheus (Groq TTS) is the default voice going forward — false is the
+// intended steady-state value, not a temporary test setting. Browser speech
+// synthesis stays wired up as a fallback path only: flip this to true if
+// Orpheus/Groq is down or rate-limited and you need voice replies to keep
+// working without it, not as a way to save API quota during normal use.
 const USE_BROWSER_TTS = false;
 
 const state = {
